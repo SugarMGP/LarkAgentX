@@ -107,6 +107,10 @@ asyncio.run(client.connect_websocket(on_message))  # 自动 ACK + 30s 心跳 + �
 
 # 发消息 / 调任意接口
 client.send_msg("你好", chat_id="<chat_id>")
+# 重试同一条消息时,复用同一个 message-cid
+client.send_msg("你好", chat_id="<chat_id>", cid="<message-retry-cid>")
+# 重试同一次建会话时,复用同一个 chat-cid;不同操作的 cid 不要复用
+client.create_chat("<user_id>", cid="<chat-retry-cid>")
 client.api("chats.PullChatsByIdsRequest", {"chatIds": ["<chat_id>"]})
 ```
 

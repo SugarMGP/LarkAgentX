@@ -145,10 +145,12 @@ class LarkClient:
         resp.raise_for_status()
         return resp.content
 
-    def send_msg(self, text: str, chat_id: str, root_id: str=None):
-        """返回服务端分配的消息 id;未能确认发送成功(请求失败,或响应里拿不到 id)时返回 None。"""
+    def send_msg(self, text: str, chat_id: str, root_id: str=None, cid: str=None):
+        """返回服务端分配的消息 id;未能确认发送成功(请求失败,或响应里拿不到 id)时返回 None。
+        cid 用于发送幂等,重试时应复用同一个值。
+        """
         thread_chat = bool(root_id) and self.is_thread_chat(chat_id)
-        pkt = builders.build_send_message_packet(text, str(chat_id), generate_long_request_id(), root_id=root_id, thread_chat=thread_chat)
+        pkt = builders.build_send_message_packet(text, str(chat_id), generate_long_request_id(), root_id=root_id, thread_chat=thread_chat, cid=cid)
         try:
             content = self._gateway_post(pkt)
         except Exception as e:
@@ -168,8 +170,8 @@ class LarkClient:
         pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)
         return builders.decode_search_response(self._gateway_post(pkt))
 
-    def create_chat(self, user_id: str):
-        pkt = builders.build_create_chat_packet(str(user_id), generate_long_request_id())
+    def create_chat(self, user_id: str, cid: str=None):
+        pkt = builders.build_create_chat_packet(str(user_id), generate_long_request_id(), cid=cid)
         return builders.decode_put_chat_response(self._gateway_post(pkt))
 
     def get_user_name(self, user_id: str, chat_id: str):

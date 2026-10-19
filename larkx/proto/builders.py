@@ -11,8 +11,8 @@ def wrap_packet(cmd: int, payload_msg, request_id: str) -> P.Packet:
     return pkt
 
 
-def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id: str=None, thread_chat: bool=False) -> P.Packet:
-    cid_1 = generate_request_cid()
+def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id: str=None, thread_chat: bool=False, cid: str=None) -> P.Packet:
+    cid_1 = str(cid) if cid else generate_request_cid()
     cid_2 = generate_request_cid()
     req = P.PutMessageRequest()
     req.type = 4
@@ -35,10 +35,12 @@ def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id:
     return wrap_packet(5, req, request_id)
 
 
-def build_create_chat_packet(user_id: str, request_id: str) -> P.Packet:
+def build_create_chat_packet(user_id: str, request_id: str, cid: str=None) -> P.Packet:
     req = P.PutChatRequest()
     req.type = 1
     req.chatterIds.append(str(user_id))
+    if cid:
+        req.cid = str(cid)
     return wrap_packet(13, req, request_id)
 
 
