@@ -197,16 +197,18 @@ class LarkClient:
         except Exception:
             return None
 
-    def mark_read(self, chat_id: str, max_position: int, message_ids=None,
-                  thread_id: str=None, thread_max_position: int=None) -> bool:
+    def mark_chat_read(self, chat_id: str, max_position: int, message_ids=None) -> bool:
         data = {'chatId': str(chat_id), 'maxPosition': int(max_position)}
         if message_ids:
             data['messageIds'] = [str(m) for m in message_ids]
-        if thread_id:
-            data['threadId'] = str(thread_id)
-        if thread_max_position is not None:
-            data['threadMaxPosition'] = int(thread_max_position)
         self.api('messages.PutReadMessagesRequest', data)
+        return True
+
+    def mark_thread_read(self, chat_id: str, thread_id: str, thread_max_position: int) -> bool:
+        self.api('messages.PutReadMessagesRequest', {
+            'chatId': str(chat_id), 'threadId': str(thread_id),
+            'threadMaxPosition': int(thread_max_position),
+        })
         return True
 
     def get_group_name(self, chat_id: str):

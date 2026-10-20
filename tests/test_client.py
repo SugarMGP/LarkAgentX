@@ -63,3 +63,15 @@ def test_network_errors_are_separate(monkeypatch):
     with pytest.raises(NetworkError):
         c._gateway_post(P.Packet(cmd=1))
 
+
+
+def test_mark_read_is_split_into_chat_and_thread_requests(monkeypatch):
+    calls = []
+    c = make_client(monkeypatch)
+    monkeypatch.setattr(c, "api", lambda type_name, data: calls.append((type_name, data)))
+    assert c.mark_chat_read("c1", 10, ["m1"]) is True
+    assert c.mark_thread_read("c1", "t1", 20) is True
+    assert calls == [
+        ("messages.PutReadMessagesRequest", {"chatId": "c1", "maxPosition": 10, "messageIds": ["m1"]}),
+        ("messages.PutReadMessagesRequest", {"chatId": "c1", "threadId": "t1", "threadMaxPosition": 20}),
+    ]
