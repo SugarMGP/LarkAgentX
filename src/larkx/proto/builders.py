@@ -11,7 +11,8 @@ def wrap_packet(cmd: int, payload_msg, request_id: str) -> P.Packet:
     return pkt
 
 
-def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id: str=None, thread_chat: bool=False, cid: str=None) -> P.Packet:
+def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id: str=None,
+                              reply_to: str=None, thread_chat: bool=False, cid: str=None) -> P.Packet:
     cid_1 = str(cid) if cid else generate_request_cid()
     cid_2 = generate_request_cid()
     req = P.PutMessageRequest()
@@ -22,10 +23,13 @@ def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id:
     req.version = 1
     if root_id:
         req.rootId = str(root_id)
-        req.parentId = str(root_id)
+        req.parentId = str(reply_to or root_id)
         # 普通群缺 isReplyInThread 会落进主会话;话题群反而拒收它(replyInThread not support chat)
         if not thread_chat:
             req.isReplyInThread = True
+    elif reply_to:
+        req.rootId = str(reply_to)
+        req.parentId = str(reply_to)
     req.content.richText.elementIds.append(cid_2)
     req.content.richText.innerText = text
     req.content.richText.elements.dictionary[cid_2].tag = 1
@@ -35,12 +39,15 @@ def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id:
     return wrap_packet(5, req, request_id)
 
 
-def build_create_chat_packet(user_id: str, request_id: str, cid: str=None, group_name: str=None) -> P.Packet:
+def build_create_chat_packet(member_ids, request_id: str, cid: str=None, group_name: str=None,
+                             description: str=None, topic: bool=False) -> P.Packet:
     req = P.PutChatRequest()
     req.type = 2
-    req.chatterIds.append(str(user_id))
+    req.chatterIds.extend(str(member_id) for member_id in member_ids)
     if group_name:
         req.groupName = str(group_name)
+    if description:
+        req.groupDesc = str(description)
     if cid:
         req.cid = str(cid)
     return wrap_packet(13, req, request_id)

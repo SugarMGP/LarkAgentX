@@ -1,0 +1,65 @@
+from types import SimpleNamespace
+
+import pytest
+
+from larkx.client import LarkClient, NetworkError, SendUnconfirmed
+from larkx.proto import builders, proto_pb2 as P
+
+
+def parsed(packet, cls=P.PutMessageRequest):
+    msg = cls(); msg.ParseFromString(packet.payload); return msg
+
+
+def make_client(monkeypatch, reply=P.Packet().SerializeToString()):
+    auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u",
+                           region=SimpleNamespace(locale="zh_CN"))
+    c = LarkClient(auth)
+    monkeypatch.setattr(c, "is_thread_chat", lambda chat_id: False)
+    monkeypatch.setattr(c, "_gateway_post", lambda packet: reply)
+    return c
+
+
+def test_send_packet_distinguishes_thread_root_and_quoted_reply():
+    req = parsed(builders.build_send_message_packet("hi", "c1", "req", root_id="r1", reply_to="q1", cid="fixed"))
+    assert (req.rootId, req.parentId, req.cid, req.isReplyInThread) == ("r1", "q1", "fixed", True)
+    req = parsed(builders.build_send_message_packet("hi", "c1", "req", reply_to="q1", cid="fixed"))
+    assert (req.rootId, req.parentId, req.isReplyInThread) == ("q1", "q1", False)
+
+
+def test_create_chat_packet_supports_members_description_and_topic(monkeypatch):
+    auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u",
+                           region=SimpleNamespace(locale="zh_CN"))
+    c = LarkClient(auth)
+    packets = []
+    def post(packet):
+        packets.append(packet)
+        return P.Packet().SerializeToString()
+    monkeypatch.setattr(c, "_gateway_post", post)
+    monkeypatch.setattr("larkx.client.generate_request_cid", lambda: "sdk-cid")
+    assert c.create_chat(["1", "2"], group_name="项目群", description="描述", topic=True) == ""
+    raw = P.PutChatRequest(); raw.ParseFromString(packets[0].payload)
+    assert (raw.type, list(raw.chatterIds), raw.groupName, raw.groupDesc, raw.cid) == (2, ["1", "2"], "项目群", "描述", "sdk-cid")
+
+
+def test_send_msg_uses_generated_cid_and_raises_unconfirmed(monkeypatch):
+    import larkx.client as client_module
+    monkeypatch.setattr(client_module, "generate_request_cid", lambda: "sdk-cid")
+    c = make_client(monkeypatch, reply=P.Packet().SerializeToString())
+    with pytest.raises(SendUnconfirmed) as error:
+        c.send_msg("hello", "c1")
+    assert error.value.cid == "sdk-cid"
+
+
+def test_network_errors_are_separate(monkeypatch):
+    import requests
+    auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u", gateway_app_id="1", cookies={},
+                           region=SimpleNamespace(locale="zh_CN", web_origin="https://example", gateway_url="https://gateway"))
+    c = LarkClient(auth)
+
+    def fail(*args, **kwargs):
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(requests, "post", fail)
+    with pytest.raises(NetworkError):
+        c._gateway_post(P.Packet(cmd=1))
+

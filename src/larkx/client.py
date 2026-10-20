@@ -1,13 +1,26 @@
 import asyncio
-import threading
 import time
 from urllib.parse import urlencode
 import requests
 import websockets
 from loguru import logger
+
+
+class NetworkError(RuntimeError):
+    pass
+
+
+class HttpError(RuntimeError):
+    pass
+
+
+class SendUnconfirmed(RuntimeError):
+    def __init__(self, message: str, cid: str):
+        super().__init__(message)
+        self.cid = cid
 from .auth import LarkAuth
 from .proto import builders, decoders, proto_pb2 as P
-from .proto.ids import generate_access_key, generate_long_request_id, generate_request_id
+from .proto.ids import generate_access_key, generate_long_request_id, generate_request_cid
 
 
 class LarkClient:
@@ -17,8 +30,6 @@ class LarkClient:
         if not self.auth.app_key or not self.auth.user_id:
             self.auth.validate(fetch_profile=True)
             self.auth.save()
-        self.loop = asyncio.new_event_loop()
-        self._loop_started = False
         self._thread_chats = {}
 
     def build_ws_url(self) -> str:
@@ -80,45 +91,39 @@ class LarkClient:
             while True:
                 await asyncio.sleep(interval)
                 await self.send_heartbeat(ws)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f'心跳停止: {e}')
 
-    def _ensure_loop(self):
-        if not self._loop_started:
-            def run_loop(loop):
-                asyncio.set_event_loop(loop)
-                loop.run_forever()
-            threading.Thread(target=run_loop, args=(self.loop,), daemon=True).start()
-            self._loop_started = True
-
     async def connect_websocket(self, on_message):
-        self._ensure_loop()
-        url = self.build_ws_url()
-        async with websockets.connect(url) as ws:
+        url = await asyncio.to_thread(self.build_ws_url)
+        async with websockets.connect(url, open_timeout=15) as ws:
             logger.info('WS 已连接')
             heartbeat_task = asyncio.create_task(self.heartbeat_loop(ws))
+            chain = asyncio.sleep(0)
             try:
                 async for raw in ws:
                     try:
                         _, packet = decoders.parse_ws_frame(raw)
-                        sid, cmd = (packet.get('sid'), packet.get('cmd'))
-                        if sid is not None:
-                            await self.send_ack(ws, sid)
-                        if cmd != 6:
+                        if packet.get("sid") is not None:
+                            await self.send_ack(ws, packet["sid"])
+                        if packet.get("cmd") != 6:
                             continue
                         for msg in decoders.decode_push_messages(raw):
-                            if not msg.get('from_id'):
-                                continue
-                            asyncio.run_coroutine_threadsafe(self._dispatch(msg, on_message), self.loop)
+                            if msg.get("from_id"):
+                                chain = asyncio.create_task(self._chain(chain, msg, on_message))
                     except Exception as e:
                         logger.debug(f'跳过异常帧: {e}')
-                        continue
             finally:
                 heartbeat_task.cancel()
+                if asyncio.iscoroutine(chain):
+                    chain = asyncio.create_task(chain)
+                await asyncio.gather(heartbeat_task, chain, return_exceptions=True)
 
-    async def _dispatch(self, msg, on_message):
+    async def _chain(self, chain, msg, on_message):
+        await chain
         try:
-            # 推送里没有会话模式,话题群的根消息要查过 chatMode 才能归到它自己的话题
             if msg['scope'] == 'chat' and msg.get('chat_type') == 2 and await asyncio.to_thread(self.is_thread_chat, msg['chat_id']):
                 msg['scope'], msg['anchor'] = decoders.resolve_scope(msg['msg_id'], msg['msg_type'], 2, '', '', thread_chat=True)
             await on_message(msg)
@@ -141,38 +146,49 @@ class LarkClient:
             'x-web-version': '3.9.32',
             'x-request-id': generate_long_request_id(),
         }
-        resp = requests.post(self.auth.region.gateway_url, headers=headers, cookies=self.auth.cookies, data=packet.SerializeToString(), timeout=15)
-        resp.raise_for_status()
+        try:
+            resp = requests.post(self.auth.region.gateway_url, headers=headers, cookies=self.auth.cookies,
+                                 data=packet.SerializeToString(), timeout=15)
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            raise HttpError(str(e)) from e
+        except requests.RequestException as e:
+            raise NetworkError(str(e)) from e
         return resp.content
 
-    def send_msg(self, text: str, chat_id: str, root_id: str=None, cid: str=None):
-        """返回服务端分配的消息 id;未能确认发送成功(请求失败,或响应里拿不到 id)时返回 None。
-        cid 用于发送幂等,重试时应复用同一个值。
-        """
+    def send_msg(self, text: str, chat_id: str, root_id: str=None, cid: str=None, reply_to: str=None):
+        """发送文本；cid 是幂等键，由调用方生成并在重试时复用。"""
         thread_chat = bool(root_id) and self.is_thread_chat(chat_id)
-        pkt = builders.build_send_message_packet(text, str(chat_id), generate_long_request_id(), root_id=root_id, thread_chat=thread_chat, cid=cid)
-        try:
-            content = self._gateway_post(pkt)
-        except Exception as e:
-            logger.error(f'发送消息失败: {e}')
-            return None
+        packet_cid = cid or generate_request_cid()
+        pkt = builders.build_send_message_packet(
+            text, str(chat_id), generate_long_request_id(),
+            root_id=root_id, reply_to=reply_to, thread_chat=thread_chat, cid=packet_cid,
+        )
+        content = self._gateway_post(pkt)
         try:
             msg_id = builders.decode_put_message_response(content)
         except Exception as e:
-            logger.error(f'服务端已接受发送请求,但响应解析失败,无法确认是否发出: {e}')
-            return None
+            raise SendUnconfirmed(f'服务端已接受发送请求，但响应解析失败: {e}', packet_cid) from e
         if not msg_id:
-            logger.error('服务端已接受发送请求,但响应里没有消息 id,无法确认是否发出')
-            return None
+            raise SendUnconfirmed('服务端已接受发送请求，但响应里没有消息 id', packet_cid)
         return msg_id
 
     def search(self, query: str):
         pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)
         return builders.decode_search_response(self._gateway_post(pkt))
 
-    def create_chat(self, user_id: str, cid: str=None, group_name: str=None):
-        pkt = builders.build_create_chat_packet(str(user_id), generate_long_request_id(), cid=cid, group_name=group_name)
-        return builders.decode_put_chat_response(self._gateway_post(pkt))
+    def create_chat(self, member_ids, cid: str=None, group_name: str=None,
+                    description: str=None, topic: bool=False):
+        packet_cid = cid or generate_request_cid()
+        data = {"type": 2, "chatterIds": [str(member_id) for member_id in member_ids], "cid": packet_cid}
+        if group_name:
+            data["groupName"] = str(group_name)
+        if description:
+            data["groupDesc"] = str(description)
+        if topic:
+            data["chatMode"] = 3
+        response = self.api("chats.PutChatRequest", data)
+        return str(((response or {}).get("chat") or {}).get("id") or "")
 
     def get_user_name(self, user_id: str, chat_id: str):
         try:
@@ -181,16 +197,17 @@ class LarkClient:
         except Exception:
             return None
 
-    def mark_read(self, chat_id: str, max_position: int, message_ids=None) -> bool:
+    def mark_read(self, chat_id: str, max_position: int, message_ids=None,
+                  thread_id: str=None, thread_max_position: int=None) -> bool:
         data = {'chatId': str(chat_id), 'maxPosition': int(max_position)}
         if message_ids:
             data['messageIds'] = [str(m) for m in message_ids]
-        try:
-            self.api('messages.PutReadMessagesRequest', data)
-            return True
-        except Exception as e:
-            logger.debug(f'标记已读失败: {e}')
-            return False
+        if thread_id:
+            data['threadId'] = str(thread_id)
+        if thread_max_position is not None:
+            data['threadMaxPosition'] = int(thread_max_position)
+        self.api('messages.PutReadMessagesRequest', data)
+        return True
 
     def get_group_name(self, chat_id: str):
         try:

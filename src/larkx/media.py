@@ -48,10 +48,10 @@ def download(auth: LarkAuth, url: str, out_path: str=None, max_bytes: int=200 * 
         return (out_path, content_type, n)
 
 
-def download_message_resource(auth: LarkAuth, msg: dict, out_path: str=None):
+def download_message_resource(auth: LarkAuth, msg: dict, out_path: str=None, max_bytes: int=200 * 1024 * 1024):
     key = extract_resource_key(msg.get('msg_type', 0), msg.get('content_data') or {})
     if not key:
         raise ValueError('该消息没有可下载的资源')
     url = message_resource_url(msg['msg_id'], key, msg['chat_id'], host=auth.region.file_host)
     logger.info(f'下载资源: {url}')
-    return download(auth, url, out_path)
+    return download(auth, url, out_path, max_bytes=max_bytes)

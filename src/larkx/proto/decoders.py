@@ -93,9 +93,10 @@ def decode_message_content(message_type, content_bytes):
         if message_type == 4:
             tc = P.TextContent()
             tc.ParseFromString(content_bytes)
+            if not tc.HasField('richText'):
+                return (tc.text, {'text': tc.text})
             d = protobuf_to_dict(tc)
-            text = extract_rich_text(d.get('richText', {})) or d.get('text', '')
-            return (text, d)
+            return (extract_rich_text(d.get('richText', {})) or d.get('text', ''), d)
         if message_type == 2:
             pc = P.PostContent()
             pc.ParseFromString(content_bytes)
@@ -233,23 +234,31 @@ def decode_message_content(message_type, content_bytes):
 def parse_ws_frame(raw: bytes):
     frame = P.Frame()
     frame.ParseFromString(raw)
-    frame_d = protobuf_to_dict(frame)
     packet = P.Packet()
     packet.ParseFromString(frame.payload)
-    packet_d = protobuf_to_dict(packet)
-    return (frame_d, packet_d)
+    return ({"seqid": frame.seqid, "logid": frame.logid}, {
+        "sid": packet.sid, "cmd": packet.cmd, "status": packet.status, "payload": packet.payload,
+        "cid": packet.cid,
+    })
 
 
 def decode_push_messages(raw: bytes):
     _, packet = parse_ws_frame(raw)
     out = []
-    if 'payload' not in packet:
+    if not packet.get('payload'):
         return out
     pmr = P.PushMessagesRequest()
     pmr.ParseFromString(packet['payload'])
-    pmr_d = protobuf_to_dict(pmr)
-    at_me_map = pmr_d.get('messagesAtMe') or {}
-    for k, v in (pmr_d.get('messages') or {}).items():
+    at_me_map = {key: value for key, value in pmr.messagesAtMe.items()}
+    for k, message in pmr.messages.items():
+        v = {
+            'id': message.id, 'type': message.type, 'chatId': message.chatId,
+            'channelId': message.channelId, 'chatType': message.chatType,
+            'fromId': message.fromId, 'rootId': message.rootId,
+            'threadId': message.threadId, 'parentId': message.parentId,
+            'cid': message.cid, 'position': message.position,
+            'createTime': message.createTime, 'content': message.content,
+        }
         message_type = enum_to_int(v.get('type', 0))
         chat_type = enum_to_int(v.get('chatType', 0))
         summary, data = decode_message_content(message_type, v.get('content', b''))
