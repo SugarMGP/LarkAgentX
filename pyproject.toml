@@ -2,6 +2,7 @@
 name = "larkx"
 version = "2.0.0"
 description = "LarkX core client for Feishu web protocol"
+authors = [{ name = "SugarMGP", email = "2350745751@qq.com" }]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,7 +18,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["larkx"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"larkx/proto/cmd_map.json" = "larkx/proto/cmd_map.json"
+packages = ["src/larkx"]
