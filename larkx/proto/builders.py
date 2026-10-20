@@ -35,10 +35,12 @@ def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id:
     return wrap_packet(5, req, request_id)
 
 
-def build_create_chat_packet(user_id: str, request_id: str, cid: str=None) -> P.Packet:
+def build_create_chat_packet(user_id: str, request_id: str, cid: str=None, group_name: str=None) -> P.Packet:
     req = P.PutChatRequest()
-    req.type = 1
+    req.type = 2
     req.chatterIds.append(str(user_id))
+    if group_name:
+        req.groupName = str(group_name)
     if cid:
         req.cid = str(cid)
     return wrap_packet(13, req, request_id)

@@ -170,8 +170,8 @@ class LarkClient:
         pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)
         return builders.decode_search_response(self._gateway_post(pkt))
 
-    def create_chat(self, user_id: str, cid: str=None):
-        pkt = builders.build_create_chat_packet(str(user_id), generate_long_request_id(), cid=cid)
+    def create_chat(self, user_id: str, cid: str=None, group_name: str=None):
+        pkt = builders.build_create_chat_packet(str(user_id), generate_long_request_id(), cid=cid, group_name=group_name)
         return builders.decode_put_chat_response(self._gateway_post(pkt))
 
     def get_user_name(self, user_id: str, chat_id: str):
