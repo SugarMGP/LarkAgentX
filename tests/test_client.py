@@ -75,3 +75,20 @@ def test_mark_read_is_split_into_chat_and_thread_requests(monkeypatch):
         ("messages.PutReadMessagesRequest", {"chatId": "c1", "maxPosition": 10, "messageIds": ["m1"]}),
         ("messages.PutReadMessagesRequest", {"chatId": "c1", "threadId": "t1", "threadMaxPosition": 20}),
     ]
+
+
+def test_recall_and_edit_messages_use_protocol_confirmations(monkeypatch):
+    c = make_client(monkeypatch)
+    replies = [{"message": "ok"}, {"message": {"id": "m-new"}}]
+    calls = []
+    monkeypatch.setattr(c, "api", lambda type_name, data: calls.append((type_name, data)) or replies.pop(0))
+    c.recall_message("m1")
+    c.edit_message("m2", "new text", cid="cid")
+    assert calls == [
+        ("messages.DeleteMessageRequest", {"id": "m1"}),
+        ("messages.EditMessageRequest", {
+            "msgId": "m2", "cid": "cid", "type": 4,
+            "content": {"richText": calls[1][1]["content"]["richText"]},
+        }),
+    ]
+    assert calls[1][1]["content"]["richText"]["innerText"] == "new text"

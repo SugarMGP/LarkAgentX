@@ -60,3 +60,37 @@ def test_ws_acks_and_processes_messages_in_order(monkeypatch):
         assert output == ["m1", "m1"]
 
     asyncio.run(check())
+
+
+def test_ws_marks_recalled_and_edited_messages(monkeypatch):
+    def status_frame(status, is_removed=False, edit_version=0):
+        message = P.entities.Message()
+        message.id = f"m{status}{int(is_removed)}{edit_version}"
+        message.type = 4
+        message.chatId = "c1"
+        message.chatType = 1
+        message.fromId = "u1"
+        message.status = status
+        if is_removed:
+            message.isRemoved = True
+        push = P.PushMessagesRequest()
+        push.messages[message.id].CopyFrom(message)
+        return P.Frame(payload=P.Packet(cmd=6, payload=push.SerializeToString()).SerializeToString()).SerializeToString()
+
+    auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u",
+                           region=SimpleNamespace(locale="zh_CN"))
+    c = LarkClient(auth)
+    monkeypatch.setattr(c, "build_ws_url", lambda: "ws://test")
+    monkeypatch.setattr("larkx.client.websockets.connect", lambda url, open_timeout=15: Socket([
+        status_frame(1), status_frame(2), status_frame(3),
+    ]))
+
+    async def check():
+        output = []
+        async def on_message(msg):
+            output.append(msg["recalled"] or msg["edited"])
+
+        await c.connect_websocket(on_message)
+        assert output == [False, True, True]
+
+    asyncio.run(check())

@@ -1,3 +1,5 @@
+from google.protobuf.json_format import MessageToDict
+
 from . import proto_pb2 as P
 from .ids import generate_request_cid
 
@@ -30,13 +32,26 @@ def build_send_message_packet(text: str, chat_id: str, request_id: str, root_id:
     elif reply_to:
         req.rootId = str(reply_to)
         req.parentId = str(reply_to)
-    req.content.richText.elementIds.append(cid_2)
-    req.content.richText.innerText = text
-    req.content.richText.elements.dictionary[cid_2].tag = 1
+    fill_text_rich_text(req.content.richText, text)
+    return wrap_packet(5, req, request_id)
+
+
+def fill_text_rich_text(rich, text: str) -> None:
+    """网页协议纯文本必须带一个 TEXT 元素；inner_text 是展示文本。"""
+    element_id = generate_request_cid()
+    rich.elementIds.append(element_id)
+    rich.innerText = str(text)
+    rich.elements.dictionary[element_id].tag = 1
     tp = P.TextProperty()
     tp.content = str(text)
-    req.content.richText.elements.dictionary[cid_2].property = tp.SerializeToString()
-    return wrap_packet(5, req, request_id)
+    rich.elements.dictionary[element_id].property = tp.SerializeToString()
+
+
+def build_text_rich_text(text: str) -> dict:
+    """编辑消息用 api() 的 richText protobuf JSON。"""
+    rich = P.RichText()
+    fill_text_rich_text(rich, text)
+    return MessageToDict(rich, preserving_proto_field_name=True)
 
 
 def build_create_chat_packet(member_ids, request_id: str, cid: str=None, group_name: str=None,

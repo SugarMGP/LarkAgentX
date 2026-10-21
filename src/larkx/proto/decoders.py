@@ -258,11 +258,13 @@ def decode_push_messages(raw: bytes):
             'threadId': message.threadId, 'parentId': message.parentId,
             'cid': message.cid, 'position': message.position,
             'createTime': message.createTime, 'content': message.content,
+            'status': message.status, 'isRemoved': message.isRemoved,
         }
         message_type = enum_to_int(v.get('type', 0))
         chat_type = enum_to_int(v.get('chatType', 0))
+        status = enum_to_int(v.get('status', 0))
         summary, data = decode_message_content(message_type, v.get('content', b''))
         root_id = v.get('rootId') or ''
         scope, anchor = resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '')
-        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data})
+        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, 'recalled': status == 2 or bool(v.get('isRemoved')), 'edited': status == 3})
     return out

@@ -18,6 +18,10 @@ class SendUnconfirmed(RuntimeError):
     def __init__(self, message: str, cid: str):
         super().__init__(message)
         self.cid = cid
+
+
+class MessageActionUnconfirmed(RuntimeError):
+    pass
 from .auth import LarkAuth
 from .proto import builders, decoders, proto_pb2 as P
 from .proto.ids import generate_access_key, generate_long_request_id, generate_request_cid
@@ -196,6 +200,22 @@ class LarkClient:
             return builders.decode_user_info_response(self._gateway_post(pkt), self.auth.region.locale)
         except Exception:
             return None
+
+    def recall_message(self, msg_id: str) -> None:
+        """撤回消息；服务端没有明确返回 ok 时不视为成功。"""
+        response = self.api('messages.DeleteMessageRequest', {'id': str(msg_id)})
+        if (response or {}).get('message') != 'ok':
+            raise MessageActionUnconfirmed(f'撤回失败: {(response or {}).get("message") or "服务端没有确认"}')
+
+    def edit_message(self, msg_id: str, text: str, cid: str=None) -> None:
+        """编辑自己发的纯文本消息；cid 是幂等键，由调用方生成并在重试时复用。"""
+        packet_cid = cid or generate_request_cid()
+        response = self.api('messages.EditMessageRequest', {
+            'msgId': str(msg_id), 'cid': packet_cid, 'type': 4,
+            'content': {'richText': builders.build_text_rich_text(text)},
+        })
+        if not ((response or {}).get('message') or {}).get('id'):
+            raise MessageActionUnconfirmed('编辑失败: 服务端没有确认')
 
     def mark_chat_read(self, chat_id: str, max_position: int, message_ids=None) -> bool:
         data = {'chatId': str(chat_id), 'maxPosition': int(max_position)}
