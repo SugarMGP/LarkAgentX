@@ -24,7 +24,7 @@ class MessageActionUnconfirmed(RuntimeError):
     pass
 from .auth import LarkAuth
 from .proto import builders, decoders, proto_pb2 as P
-from .proto.ids import generate_access_key, generate_long_request_id, generate_request_cid
+from .proto.ids import generate_access_key, generate_long_request_id, generate_request_cid, generate_request_id
 
 
 class LarkClient:
@@ -34,7 +34,6 @@ class LarkClient:
         if not self.auth.app_key or not self.auth.user_id:
             self.auth.validate(fetch_profile=True)
             self.auth.save()
-        self._thread_chats = {}
 
     def build_ws_url(self) -> str:
         device_id = self.auth.device_id
@@ -128,8 +127,6 @@ class LarkClient:
     async def _chain(self, chain, msg, on_message):
         await chain
         try:
-            if msg['scope'] == 'chat' and msg.get('chat_type') == 2 and await asyncio.to_thread(self.is_thread_chat, msg['chat_id']):
-                msg['scope'], msg['anchor'] = decoders.resolve_scope(msg['msg_id'], msg['msg_type'], 2, '', '', thread_chat=True)
             await on_message(msg)
         except Exception as e:
             logger.error(f'消息回调异常: {e}')
@@ -160,13 +157,11 @@ class LarkClient:
             raise NetworkError(str(e)) from e
         return resp.content
 
-    def send_msg(self, text: str, chat_id: str, root_id: str=None, cid: str=None, reply_to: str=None):
-        """发送文本；cid 是幂等键，由调用方生成并在重试时复用。"""
-        thread_chat = bool(root_id) and self.is_thread_chat(chat_id)
+    def send_msg(self, text: str, chat_id: str, cid: str=None, reply_to: str=None):
+        """发送文本；reply_to 是引用回复（被回复消息 id）；cid 是幂等键，由调用方生成并在重试时复用。"""
         packet_cid = cid or generate_request_cid()
         pkt = builders.build_send_message_packet(
-            text, str(chat_id), generate_long_request_id(),
-            root_id=root_id, reply_to=reply_to, thread_chat=thread_chat, cid=packet_cid,
+            text, str(chat_id), generate_long_request_id(), reply_to=reply_to, cid=packet_cid,
         )
         content = self._gateway_post(pkt)
         try:
@@ -182,7 +177,7 @@ class LarkClient:
         return builders.decode_search_response(self._gateway_post(pkt))
 
     def create_group_chat(self, member_ids, group_name: str=None, description: str=None,
-                          topic: bool=False, cid: str=None) -> str:
+                          cid: str=None) -> str:
         """建群并拉人，返回 chat_id；cid 是幂等键，由调用方生成并在重试时复用。"""
         packet_cid = cid or generate_request_cid()
         data = {"type": 2, "chatterIds": [str(member_id) for member_id in member_ids], "cid": packet_cid}
@@ -190,8 +185,6 @@ class LarkClient:
             data["groupName"] = str(group_name)
         if description:
             data["groupDesc"] = str(description)
-        if topic:
-            data["chatMode"] = 3
         response = self.api("chats.PutChatRequest", data)
         return str(((response or {}).get("chat") or {}).get("id") or "")
 
@@ -230,13 +223,6 @@ class LarkClient:
         self.api('messages.PutReadMessagesRequest', data)
         return True
 
-    def mark_thread_read(self, chat_id: str, thread_id: str, thread_max_position: int) -> bool:
-        self.api('messages.PutReadMessagesRequest', {
-            'chatId': str(chat_id), 'threadId': str(thread_id),
-            'threadMaxPosition': int(thread_max_position),
-        })
-        return True
-
     def get_group_name(self, chat_id: str):
         try:
             pkt = builders.build_group_info_packet(str(chat_id), generate_long_request_id())
@@ -266,31 +252,16 @@ class LarkClient:
             return chat
         return None
 
-    def is_thread_chat(self, chat_id: str) -> bool:
-        chat_id = str(chat_id)
-        if chat_id not in self._thread_chats:
-            try:
-                info = self.get_chat_info(chat_id)
-            except Exception as e:
-                logger.debug(f'查询会话模式失败,按普通会话处理: {e}')
-                return False
-            if info is None:
-                return False
-            self._thread_chats[chat_id] = decoders.is_thread_chat(info)
-        return self._thread_chats[chat_id]
-
     def pull_history(self, chat_id: str, positions, save_storage=None):
         resp = self.api('messages.PullMessagesByPositionsRequest', {'chatId': str(chat_id), 'positions': [int(p) for p in positions]})
         messages = (resp or {}).get('messages') or {}
-        thread_chat = self.is_thread_chat(chat_id)
         out = []
         for pos_key, v in sorted(messages.items(), key=lambda kv: int(kv[0])):
             message_type = decoders.enum_to_int(v.get('type', 0))
             chat_type = decoders.enum_to_int(v.get('chatType', 0))
             summary, data = decoders.decode_message_content(message_type, v.get('content', b''))
             root_id = v.get('rootId') or ''
-            scope, anchor = decoders.resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '', thread_chat)
-            msg = {'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': decoders.MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId') or str(chat_id), 'chat_type': chat_type, 'chat_type_name': decoders.CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': False, 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position') or int(pos_key), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, **decoders.message_flags(v)}
+            msg = {'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': decoders.MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId') or str(chat_id), 'chat_type': chat_type, 'chat_type_name': decoders.CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'at_me': False, 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position') or int(pos_key), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, **decoders.message_flags(v)}
             out.append(msg)
             if save_storage is not None:
                 try:

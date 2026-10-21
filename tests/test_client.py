@@ -14,16 +14,15 @@ def make_client(monkeypatch, reply=P.Packet().SerializeToString()):
     auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u",
                            region=SimpleNamespace(locale="zh_CN"))
     c = LarkClient(auth)
-    monkeypatch.setattr(c, "is_thread_chat", lambda chat_id: False)
     monkeypatch.setattr(c, "_gateway_post", lambda packet: reply)
     return c
 
 
-def test_send_packet_distinguishes_thread_root_and_quoted_reply():
-    req = parsed(builders.build_send_message_packet("hi", "c1", "req", root_id="r1", reply_to="q1", cid="fixed"))
-    assert (req.rootId, req.parentId, req.cid, req.isReplyInThread) == ("r1", "q1", "fixed", True)
+def test_send_packet_only_supports_quoted_reply():
     req = parsed(builders.build_send_message_packet("hi", "c1", "req", reply_to="q1", cid="fixed"))
-    assert (req.rootId, req.parentId, req.isReplyInThread) == ("q1", "q1", False)
+    assert (req.rootId, req.parentId, req.cid, req.isReplyInThread) == ("q1", "q1", "fixed", False)
+    req = parsed(builders.build_send_message_packet("hi", "c1", "req", cid="fixed"))
+    assert (req.rootId, req.parentId, req.isReplyInThread) == ("", "", False)
 
 
 def test_group_and_p2p_chat_requests_differ_in_type(monkeypatch):
@@ -36,7 +35,7 @@ def test_group_and_p2p_chat_requests_differ_in_type(monkeypatch):
         return P.Packet().SerializeToString()
     monkeypatch.setattr(c, "_gateway_post", post)
     monkeypatch.setattr("larkx.client.generate_request_cid", lambda: "sdk-cid")
-    assert c.create_group_chat(["1", "2"], group_name="项目群", description="描述", topic=True) == ""
+    assert c.create_group_chat(["1", "2"], group_name="项目群", description="描述") == ""
     assert c.create_p2p_chat("9") == ""
     group = P.PutChatRequest(); group.ParseFromString(packets[0].payload)
     p2p = P.PutChatRequest(); p2p.ParseFromString(packets[1].payload)
@@ -68,15 +67,13 @@ def test_network_errors_are_separate(monkeypatch):
 
 
 
-def test_mark_read_is_split_into_chat_and_thread_requests(monkeypatch):
+def test_mark_read_uses_the_chat_read_request(monkeypatch):
     calls = []
     c = make_client(monkeypatch)
     monkeypatch.setattr(c, "api", lambda type_name, data: calls.append((type_name, data)))
     assert c.mark_chat_read("c1", 10, ["m1"]) is True
-    assert c.mark_thread_read("c1", "t1", 20) is True
     assert calls == [
         ("messages.PutReadMessagesRequest", {"chatId": "c1", "maxPosition": 10, "messageIds": ["m1"]}),
-        ("messages.PutReadMessagesRequest", {"chatId": "c1", "threadId": "t1", "threadMaxPosition": 20}),
     ]
 
 
@@ -95,3 +92,13 @@ def test_recall_and_edit_messages_use_protocol_confirmations(monkeypatch):
         }),
     ]
     assert calls[1][1]["content"]["richText"]["innerText"] == "new text"
+
+
+def test_build_ws_url_contains_ticket_and_request_id(monkeypatch):
+    auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u", device_id="dev",
+                           get_ticket=lambda: "ticket-1",
+                           region=SimpleNamespace(locale="zh_CN", ws_url="wss://example/ws"))
+    c = LarkClient(auth)
+    url = c.build_ws_url()
+    assert url.startswith("wss://example/ws?")
+    assert "ticket=ticket-1" in url and "request_id=" in url and "access_key=" in url

@@ -9,8 +9,6 @@ MSG_TYPE_NAMES = {
     22: 'COMMERCIALIZED_HONGBAO', 23: 'SHARE_USER_CARD', 24: 'TODO', 25: 'FOLDER',
 }
 CHAT_TYPE_NAMES = {0: 'UNKNOWN', 1: 'P2P', 2: 'GROUP', 3: 'TOPIC_GROUP'}
-# Chat.ChatMode 的 THREAD / THREAD_V2;新建的话题群是 GROUP + 这两种模式,旧版话题群才是 TOPIC_GROUP
-THREAD_CHAT_MODES = (2, 3)
 
 
 def enum_to_int(value):
@@ -27,11 +25,6 @@ def enum_to_int(value):
     return 0
 
 
-def is_thread_chat(chat_info: dict) -> bool:
-    """话题群里每条根消息自成一个话题。chat_info 为 chats.PullChatsByIdsRequest 返回的单个会话。"""
-    return enum_to_int(chat_info.get('chatMode', 0)) in THREAD_CHAT_MODES or enum_to_int(chat_info.get('type', 0)) == 3
-
-
 def message_flags(message: dict) -> dict:
     """把网页协议的 status/isRemoved 包装成召回与编辑标记。"""
     status = enum_to_int(message.get('status', 0))
@@ -39,18 +32,6 @@ def message_flags(message: dict) -> dict:
         'recalled': status == 2 or bool(message.get('isRemoved')),
         'edited': status == 3,
     }
-
-
-def resolve_scope(msg_id: str, msg_type: int, chat_type: int, root_id: str, thread_id: str, thread_chat: bool=False) -> tuple:
-    """返回 (scope, anchor):anchor 是回复时的 --root,也是 agent 的会话边界。"""
-    if chat_type == 1:
-        return ('chat', '')
-    if root_id and root_id != '0':
-        return ('topic', thread_id or root_id)
-    # 话题群的根消息本身就开启一个话题(建群等系统提示除外);普通群每条消息也带 threadId=自身 id,不能据此判断
-    if (thread_chat or chat_type == 3) and msg_type != 6:
-        return ('topic', msg_id or '')
-    return ('chat', '')
 
 
 def extract_rich_text(rich_text_dict):
@@ -274,6 +255,5 @@ def decode_push_messages(raw: bytes):
         flags = message_flags(v)
         summary, data = decode_message_content(message_type, v.get('content', b''))
         root_id = v.get('rootId') or ''
-        scope, anchor = resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '')
-        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, **flags})
+        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, **flags})
     return out
