@@ -26,7 +26,7 @@ def test_send_packet_distinguishes_thread_root_and_quoted_reply():
     assert (req.rootId, req.parentId, req.isReplyInThread) == ("q1", "q1", False)
 
 
-def test_create_chat_packet_supports_members_description_and_topic(monkeypatch):
+def test_group_and_p2p_chat_requests_differ_in_type(monkeypatch):
     auth = SimpleNamespace(require_valid=lambda: None, app_key="k", user_id="u",
                            region=SimpleNamespace(locale="zh_CN"))
     c = LarkClient(auth)
@@ -36,9 +36,12 @@ def test_create_chat_packet_supports_members_description_and_topic(monkeypatch):
         return P.Packet().SerializeToString()
     monkeypatch.setattr(c, "_gateway_post", post)
     monkeypatch.setattr("larkx.client.generate_request_cid", lambda: "sdk-cid")
-    assert c.create_chat(["1", "2"], group_name="项目群", description="描述", topic=True) == ""
-    raw = P.PutChatRequest(); raw.ParseFromString(packets[0].payload)
-    assert (raw.type, list(raw.chatterIds), raw.groupName, raw.groupDesc, raw.cid) == (2, ["1", "2"], "项目群", "描述", "sdk-cid")
+    assert c.create_group_chat(["1", "2"], group_name="项目群", description="描述", topic=True) == ""
+    assert c.create_p2p_chat("9") == ""
+    group = P.PutChatRequest(); group.ParseFromString(packets[0].payload)
+    p2p = P.PutChatRequest(); p2p.ParseFromString(packets[1].payload)
+    assert (group.type, list(group.chatterIds), group.groupName, group.groupDesc, group.cid) == (2, ["1", "2"], "项目群", "描述", "sdk-cid")
+    assert (p2p.type, list(p2p.chatterIds)) == (1, ["9"])
 
 
 def test_send_msg_uses_generated_cid_and_raises_unconfirmed(monkeypatch):

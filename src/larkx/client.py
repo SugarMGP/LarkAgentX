@@ -181,8 +181,9 @@ class LarkClient:
         pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)
         return builders.decode_search_response(self._gateway_post(pkt))
 
-    def create_chat(self, member_ids, cid: str=None, group_name: str=None,
-                    description: str=None, topic: bool=False):
+    def create_group_chat(self, member_ids, group_name: str=None, description: str=None,
+                          topic: bool=False, cid: str=None) -> str:
+        """建群并拉人，返回 chat_id；cid 是幂等键，由调用方生成并在重试时复用。"""
         packet_cid = cid or generate_request_cid()
         data = {"type": 2, "chatterIds": [str(member_id) for member_id in member_ids], "cid": packet_cid}
         if group_name:
@@ -192,6 +193,11 @@ class LarkClient:
         if topic:
             data["chatMode"] = 3
         response = self.api("chats.PutChatRequest", data)
+        return str(((response or {}).get("chat") or {}).get("id") or "")
+
+    def create_p2p_chat(self, user_id: str) -> str:
+        """和某个用户的单聊：已有则返回原会话，没有则服务端新建。"""
+        response = self.api("chats.PutChatRequest", {"type": 1, "chatterIds": [str(user_id)]})
         return str(((response or {}).get("chat") or {}).get("id") or "")
 
     def get_user_name(self, user_id: str, chat_id: str):
