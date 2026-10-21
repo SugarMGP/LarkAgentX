@@ -70,8 +70,8 @@ def test_network_errors_are_separate(monkeypatch):
 def test_mark_read_uses_the_chat_read_request(monkeypatch):
     calls = []
     c = make_client(monkeypatch)
-    monkeypatch.setattr(c, "api", lambda type_name, data: calls.append((type_name, data)))
-    assert c.mark_chat_read("c1", 10, ["m1"]) is True
+    monkeypatch.setattr(c, "api", lambda type_name, data: calls.append((type_name, data)) or {"readPosition": "10"})
+    assert c.mark_chat_read("c1", 10, ["m1"]) == {"readPosition": "10"}
     assert calls == [
         ("messages.PutReadMessagesRequest", {"chatId": "c1", "maxPosition": 10, "messageIds": ["m1"]}),
     ]

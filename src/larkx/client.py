@@ -216,12 +216,12 @@ class LarkClient:
         if not ((response or {}).get('message') or {}).get('id'):
             raise MessageActionUnconfirmed('编辑失败: 服务端没有确认')
 
-    def mark_chat_read(self, chat_id: str, max_position: int, message_ids=None) -> bool:
+    def mark_chat_read(self, chat_id: str, max_position: int, message_ids=None) -> dict:
+        """标记会话已读，返回飞书的真实响应（已读位置、未读数等）。"""
         data = {'chatId': str(chat_id), 'maxPosition': int(max_position)}
         if message_ids:
             data['messageIds'] = [str(m) for m in message_ids]
-        self.api('messages.PutReadMessagesRequest', data)
-        return True
+        return self.api('messages.PutReadMessagesRequest', data)
 
     def get_group_name(self, chat_id: str):
         try:
