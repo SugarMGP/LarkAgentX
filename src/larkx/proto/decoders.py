@@ -32,6 +32,15 @@ def is_thread_chat(chat_info: dict) -> bool:
     return enum_to_int(chat_info.get('chatMode', 0)) in THREAD_CHAT_MODES or enum_to_int(chat_info.get('type', 0)) == 3
 
 
+def message_flags(message: dict) -> dict:
+    """把网页协议的 status/isRemoved 包装成召回与编辑标记。"""
+    status = enum_to_int(message.get('status', 0))
+    return {
+        'recalled': status == 2 or bool(message.get('isRemoved')),
+        'edited': status == 3,
+    }
+
+
 def resolve_scope(msg_id: str, msg_type: int, chat_type: int, root_id: str, thread_id: str, thread_chat: bool=False) -> tuple:
     """返回 (scope, anchor):anchor 是回复时的 --root,也是 agent 的会话边界。"""
     if chat_type == 1:
@@ -262,9 +271,9 @@ def decode_push_messages(raw: bytes):
         }
         message_type = enum_to_int(v.get('type', 0))
         chat_type = enum_to_int(v.get('chatType', 0))
-        status = enum_to_int(v.get('status', 0))
+        flags = message_flags(v)
         summary, data = decode_message_content(message_type, v.get('content', b''))
         root_id = v.get('rootId') or ''
         scope, anchor = resolve_scope(v.get('id'), message_type, chat_type, root_id, v.get('threadId') or '')
-        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, 'recalled': status == 2 or bool(v.get('isRemoved')), 'edited': status == 3})
+        out.append({'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId'), 'chat_type': chat_type, 'chat_type_name': CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'scope': scope, 'anchor': anchor, 'at_me': bool(at_me_map.get(v.get('id')) or at_me_map.get(k)), 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position'), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, **flags})
     return out

@@ -1,7 +1,7 @@
 from .auth import AuthExpired, LarkAuth, QrLogin
 from .client import HttpError, LarkClient, MessageActionUnconfirmed, NetworkError, SendUnconfirmed
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 __all__ = [
     "AuthExpired",
