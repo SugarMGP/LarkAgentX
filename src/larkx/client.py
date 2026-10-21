@@ -211,7 +211,7 @@ class LarkClient:
         """编辑自己发的纯文本消息；cid 是幂等键，由调用方生成并在重试时复用。"""
         packet_cid = cid or generate_request_cid()
         response = self.api('messages.EditMessageRequest', {
-            'msgId': str(msg_id), 'cid': packet_cid, 'type': 4,
+            'msgId': int(msg_id), 'cid': packet_cid, 'type': 4,
             'content': {'richText': builders.build_text_rich_text(text)},
         })
         if not ((response or {}).get('message') or {}).get('id'):
