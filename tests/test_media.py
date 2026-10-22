@@ -132,3 +132,39 @@ def test_upload_file_reports_failure(monkeypatch):
     monkeypatch.setattr(media.requests, "post", lambda url, **kwargs: FakeResponse(body={"status": "fail", "message": "太大"}))
     with pytest.raises(ValueError, match="太大"):
         media.upload_file(auth_stub(), "c1", b"x", "a.pdf")
+
+
+class _Response:
+    def __init__(self, body=b"x"):
+        self.body = body
+        self.status_code = 200
+        self.headers = {"content-type": "application/octet-stream"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, size):
+        yield self.body
+
+
+def test_download_only_sends_cookies_to_the_same_region(monkeypatch):
+    seen = {}
+
+    def fake_get(url, **kwargs):
+        seen["url"] = url
+        seen["cookies"] = kwargs.get("cookies")
+        return _Response()
+
+    monkeypatch.setattr("larkx.media.requests.get", fake_get)
+    auth = SimpleNamespace(cookies={"session": "s"},
+                           region=SimpleNamespace(domain="feishu.cn"))
+    media.download(auth, "https://internal-api-lark-file.feishu.cn/x")
+    assert seen["cookies"] == {"session": "s"}
+    media.download(auth, "https://evil.example.com/x")
+    assert seen["cookies"] == {}

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from larkx.client import LarkClient, NetworkError, SendUnconfirmed
+from larkx.client import LarkClient, NetworkError, ProtocolError, SendUnconfirmed
 from larkx.proto import builders, proto_pb2 as P
 
 
@@ -102,3 +102,73 @@ def test_build_ws_url_contains_ticket_and_request_id(monkeypatch):
     url = c.build_ws_url()
     assert url.startswith("wss://example/ws?")
     assert "ticket=ticket-1" in url and "request_id=" in url and "access_key=" in url
+
+
+def test_api_raises_on_protocol_error_status(monkeypatch):
+    c = make_client(monkeypatch, P.Packet(status=9).SerializeToString())
+    with pytest.raises(ProtocolError, match="status=9"):
+        c.api("users.PullUserProfileRequest", {"targetUserId": "1"})
+
+
+def test_pull_chats_returns_chats_by_id(monkeypatch):
+    c = make_client(monkeypatch)
+    seen = {}
+
+    def api(name, data=None, raw=None):
+        seen["name"], seen["data"] = name, data
+        return {"chats": {"c1": {"id": "c1", "type": 2, "name": "群"}}}
+
+    monkeypatch.setattr(c, "api", api)
+    assert c.pull_chats(["c1"]) == {"c1": {"id": "c1", "type": 2, "name": "群"}}
+    assert seen["name"] == "chats.PullChatsByIdsRequest" and seen["data"] == {"chatIds": ["c1"]}
+
+
+def test_pull_feed_uses_cursor_only_for_later_pages(monkeypatch):
+    c = make_client(monkeypatch)
+    seen = []
+
+    def api(name, data=None, raw=None):
+        seen.append(data)
+        return {"chats": {}, "nextCursor": 7}
+
+    monkeypatch.setattr(c, "api", api)
+    c.pull_feed(count=20)
+    c.pull_feed(count=20, cursor=7)
+    assert seen[0]["pullType"] == 1 and "cursor" not in seen[0]
+    assert seen[1]["pullType"] == 2 and seen[1]["cursor"] == 7
+
+
+def test_pull_chatter_names_batches_ids(monkeypatch):
+    c = make_client(monkeypatch)
+    seen = {}
+
+    def api(name, data=None, raw=None):
+        seen.update(data or {})
+        return {"chatters": {"1": {"name": "张三"}, "2": {"name": ""}}}
+
+    monkeypatch.setattr(c, "api", api)
+    assert c.pull_chatter_names(["1", "2"]) == {"1": "张三", "2": ""}
+    assert seen["chatId"] == 0 and seen["chatterIds"] == [1, 2]
+
+
+def test_get_user_profile_returns_none_without_name(monkeypatch):
+    c = make_client(monkeypatch)
+    monkeypatch.setattr(c, "api", lambda name, data=None, raw=None: {"email": "a@b.com"})
+    assert c.get_user_profile("1") is None
+    monkeypatch.setattr(c, "api", lambda name, data=None, raw=None: {"name": "张三", "email": "a@b.com"})
+    assert c.get_user_profile("1")["email"] == "a@b.com"
+
+
+def test_search_user_ids_by_email_only_keeps_exact_match(monkeypatch):
+    c = make_client(monkeypatch)
+
+    def api(name, data=None, raw=None):
+        return {"entitiesInfos": {
+            "san@dewu.com": {"entityInfo": [{"entityId": 123, "entityType": 1},
+                                            {"entityId": 456, "entityType": 2}]},
+            "other@dewu.com": {"entityInfo": [{"entityId": 789, "entityType": 1}]},
+        }}
+
+    monkeypatch.setattr(c, "api", api)
+    assert c.search_user_ids_by_email("san@dewu.com") == ["123"]
+    assert c.search_user_ids_by_email("SAN@DEWU.COM") == ["123"]

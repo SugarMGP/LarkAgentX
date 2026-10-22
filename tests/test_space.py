@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from larkx.client import LarkClient
-from larkx.space import SpaceClient, SpaceError, _blocks_to_markdown
+from larkx.space import SpaceClient, SpaceError, _blocks_to_markdown, _decode_line
 
 
 class FakeResponse:
@@ -54,31 +54,6 @@ def test_business_error_is_raised(monkeypatch):
                         lambda url, **kwargs: FakeResponse({"code": 2, "msg": "Parameter Error"}))
     with pytest.raises(SpaceError, match="Parameter Error"):
         SpaceClient(auth_stub()).files()
-
-
-def test_document_by_url_returns_doc_info():
-    class Client(LarkClient):
-        def __init__(self):
-            pass
-
-        def api(self, name, data):
-            assert name == "docs.PullDocByURLsRequest"
-            assert data == {"urls": ["https://x.feishu.cn/wiki/abc"]}
-            return {"docs": {"https://x.feishu.cn/wiki/abc": {"token": "T1", "url": "u"}}}
-
-    assert Client().document_by_url("https://x.feishu.cn/wiki/abc")["token"] == "T1"
-
-
-def test_document_by_url_raises_when_not_resolvable():
-    class Client(LarkClient):
-        def __init__(self):
-            pass
-
-        def api(self, name, data):
-            return {"docs": {}}
-
-    with pytest.raises(ValueError):
-        Client().document_by_url("https://x.feishu.cn/wiki/abc")
 
 
 def text_block(text, attribs="", num_to_attrib=None):
@@ -254,3 +229,46 @@ def test_search_user_returns_candidates(monkeypatch):
     assert out == [{"owner_id": "u1", "owner_name": "张三", "owner_type": 1}]
     assert captured["url"].endswith("/space/api/search/permission_candidates/")
     assert captured["params"] == {"query": "san@dewu.com"}
+
+
+def test_document_blocks_follows_the_cursor(monkeypatch):
+    pages = [
+        {"code": 0, "data": {"block_map": {"b1": {}}, "block_sequence": ["b1"], "has_more": True, "cursor": "c1"}},
+        {"code": 0, "data": {"block_map": {"b2": {}}, "block_sequence": ["b2"], "has_more": False, "cursor": "c2"}},
+    ]
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(kwargs.get("params"))
+        return FakeResponse(pages[min(len(calls) - 1, 1)])
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    data = SpaceClient(auth_stub()).document_blocks("T1")
+    assert sorted(data["block_map"]) == ["b1", "b2"]
+    assert data["block_sequence"] == ["b1", "b2"]
+    assert calls[0].get("cursor") is None and calls[1]["cursor"] == "c1"
+
+
+def test_http_error_becomes_space_error(monkeypatch):
+    monkeypatch.setattr("larkx.space.requests.get",
+                        lambda url, **kwargs: FakeResponse("boom", status=500))
+    with pytest.raises(SpaceError, match="HTTP 500"):
+        SpaceClient(auth_stub()).files()
+
+
+def test_document_markdown_drops_query_and_fragment(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(kwargs.get("params"))
+        return FakeResponse({"code": 0, "data": {"block_map": {}, "block_sequence": []}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    SpaceClient(auth_stub()).document_markdown("https://x.feishu.cn/docx/AbC123?from=copy#frag")
+    assert calls[0]["id"] == "AbC123"
+
+
+def test_pipe_op_replaces_the_style_set():
+    nodes = _decode_line("abcdef", "*0+3|1+2", {"0": ["bold", "true"], "1": ["italic", "true"]})
+    assert [(n["text"], n.get("bold"), n.get("italic")) for n in nodes] == [
+        ("abc", True, None), ("de", None, True), ("f", None, None)]

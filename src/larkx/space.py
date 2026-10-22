@@ -127,6 +127,9 @@ def _decode_line(text: str, attribs: str, num_to_attrib: dict) -> list[dict]:
         code, num = op[0], op[1:]
         if code == "*":
             pending.append(int(num, 36))
+        elif code == "|":
+            # insertAttribute：换成这个样式，不是叠加。
+            pending = [int(num, 36)]
         elif code == "+":
             length = int(num, 36)
             chunk = text[index:index + length]
@@ -296,9 +299,15 @@ class SpaceClient:
         url = f'{host or self.auth.region.internal_api_host}{path}'
         response = requests.get(url, params=params, cookies=self.auth.cookies,
                                 headers=self._headers(), timeout=30)
-        response.raise_for_status()
+        self._raise_for_status(response, path)
         self._remember_csrf(response)
         return _unwrap(path, response.json())
+
+    @staticmethod
+    def _raise_for_status(response, path: str) -> None:
+        """HTTP 错误统一抛 SpaceError，调用方才能按业务错误统一处理。"""
+        if response.status_code >= 400:
+            raise SpaceError(f'{path} HTTP {response.status_code}: {response.text[:200]}')
 
     def _remember_csrf(self, response) -> None:
         """记下 _csrf_token：写操作要带的 X-CSRFToken 就是它，读接口的响应会下发。"""
@@ -322,7 +331,7 @@ class SpaceClient:
         response = requests.post(url, params=params or None,
                                  **({'data': data} if data is not None else {'json': json_body}),
                                  cookies=self.auth.cookies, headers=merged, timeout=timeout)
-        response.raise_for_status()
+        self._raise_for_status(response, path)
         return _unwrap(path, response.json())
 
     def _headers(self) -> dict:
@@ -420,10 +429,6 @@ class SpaceClient:
         nodes = ((data.get('entities') or {}).get('nodes') or {})
         return list(nodes.values())
 
-    def root(self) -> dict:
-        """云空间根目录信息。"""
-        return self._get('/space/api/explorer/root/')
-
     # ---------- 云文档 ----------
 
     def wiki_node(self, wiki_token: str) -> dict:
@@ -441,10 +446,21 @@ class SpaceClient:
         if wiki_token:
             params.update({'wiki_space_id': space_id, 'container_type': 'wiki2.0', 'container_id': wiki_token})
         data = self._get('/space/api/docx/pages/client_vars', **params)
+        skipped = list(data.get('skip_blocks') or [])
+        # 长文档要按 cursor 翻页，否则只拿到前 239 块。
+        while data.get('has_more') and data.get('cursor'):
+            page = self._get('/space/api/docx/pages/client_vars', **dict(params, cursor=data['cursor']))
+            cursor = page.get('cursor')
+            if not page.get('block_map') or cursor == data.get('cursor'):
+                break
+            data.setdefault('block_map', {}).update(page.get('block_map') or {})
+            data['block_sequence'] = list(data.get('block_sequence') or []) + list(page.get('block_sequence') or [])
+            skipped += list(page.get('skip_blocks') or [])
+            data['cursor'] = cursor
+            data['has_more'] = page.get('has_more')
         # 表格的单元格块不在首屏（表格块被 skip_blocks 跳过），按表格块再拉一次。
-        for table_id in data.get('skip_blocks') or []:
+        for table_id in skipped:
             extra = dict(params, mode=4, block_id=table_id)
-            extra.pop('cursor', None)
             try:
                 more = self._get('/space/api/docx/pages/client_vars', **extra)
             except SpaceError:
@@ -454,6 +470,8 @@ class SpaceClient:
 
     def document_markdown(self, url_or_token: str) -> str:
         """读一篇文档并转成 markdown。传 wiki 链接、docx 链接或文档 token 都行。"""
+        # 分享链接常带 ?from= 或 #，文档 token 不能带查询串。
+        url_or_token = url_or_token.strip().split('?', 1)[0].split('#', 1)[0]
         token = url_or_token
         space_id, wiki_token = '', ''
         if '/wiki/' in url_or_token:

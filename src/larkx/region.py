@@ -29,10 +29,6 @@ class Region:
         return f'{self.api_host}/accounts/web/user'
 
     @property
-    def csrf_url(self) -> str:
-        return f'{self.api_host}/accounts/csrf'
-
-    @property
     def gateway_url(self) -> str:
         return f'{self.api_host}/im/gateway/'
 

@@ -64,7 +64,9 @@ class LarkAuth:
         self.web_app_id = ''
         self.user_id = ''
         ok, msg = self.validate(fetch_profile=True)
-        self.save()
+        if ok:
+            # 校验没过就别覆盖磁盘上还能用的凭证。
+            self.save()
         return (ok, msg)
 
     def import_cookie_string(self, cookie_str: str, region: Region=None):
@@ -86,16 +88,12 @@ class LarkAuth:
             return (False, '无凭证,请先 lark auth import')
         if not self.device_id:
             self.device_id = self.cookies.get('passport_web_did', '')
+        # 网络异常向上传，不能被 require_valid 误判成凭证失效。
         try:
-            r = requests.get(self.region.ticket_url, params={'local_device_id': self.device_id}, cookies=self.cookies, timeout=10)
-            j = r.json()
-            ticket = j.get('ticket')
-            if not ticket:
-                reason = j.get('message', str(j))
-                age_h = (time.time() - self.saved_at) / 3600 if self.saved_at else -1
-                return (False, f'会话已被服务端注销(凭证保存于 {age_h:.1f}h 前): {reason}\n请重新登录: lark auth qr 或 lark auth import')
-        except Exception as e:
-            return (False, f'ticket 探针网络异常(先检查网络,不一定是凭证问题): {e}')
+            self.get_ticket()
+        except AuthExpired as exc:
+            age_h = (time.time() - self.saved_at) / 3600 if self.saved_at else -1
+            return (False, f'会话已被服务端注销(凭证保存于 {age_h:.1f}h 前): {exc}\n请重新登录: lark auth qr 或 lark auth import')
         if fetch_profile:
             self._fetch_profile()
         age_h = (time.time() - self.saved_at) / 3600 if self.saved_at else -1
@@ -140,17 +138,6 @@ class LarkAuth:
         if not ticket:
             raise AuthExpired(f'获取 ticket 失败: {j}')
         return ticket
-
-    def refresh_csrf(self) -> str:
-        r = requests.post(self.region.csrf_url, params={'_t': int(time.time() * 1000)}, cookies=self.cookies, timeout=10)
-        token = r.cookies.get('swp_csrf_token')
-        if token:
-            self.csrf_token = token
-            self.save()
-        return self.csrf_token
-
-    def status(self) -> dict:
-        return {'region': self.region.name, 'has_credentials': bool(self.cookies), 'saved_at': self.saved_at, 'device_id': self.device_id, 'user_id': self.user_id, 'app_key': self.app_key, 'web_app_id': self.gateway_app_id, 'path': str(self.path)}
 
 
 QR_STATUS_NAMES = {0: "SUCCESS", 1: "等待扫码", 2: "已扫码待确认", 3: "已取消", 4: "错误", 5: "已过期"}

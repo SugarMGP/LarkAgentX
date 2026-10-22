@@ -1,5 +1,6 @@
 from .auth import AuthExpired, LarkAuth, QrLogin
-from .client import HttpError, LarkClient, MessageActionUnconfirmed, NetworkError, SendUnconfirmed
+from .client import (HttpError, LarkClient, MessageActionUnconfirmed, NetworkError, ProtocolError,
+                     SendUnconfirmed)
 from .space import SpaceClient, SpaceError
 
 __version__ = "2.8.0"
@@ -10,6 +11,7 @@ __all__ = [
     "HttpError",
     "LarkClient",
     "MessageActionUnconfirmed",
+    "ProtocolError",
     "QrLogin",
     "NetworkError",
     "SendUnconfirmed",

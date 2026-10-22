@@ -22,6 +22,12 @@ class SendUnconfirmed(RuntimeError):
 
 class MessageActionUnconfirmed(RuntimeError):
     pass
+
+
+class ProtocolError(RuntimeError):
+    """飞书网关返回了错误状态（status != 0）。"""
+
+
 from .auth import LarkAuth
 from .proto import builders, decoders, proto_pb2 as P
 from .proto.ids import generate_access_key, generate_long_request_id, generate_request_cid, generate_request_id
@@ -30,10 +36,18 @@ from .proto.ids import generate_access_key, generate_long_request_id, generate_r
 class LarkClient:
     def __init__(self, auth: LarkAuth):
         self.auth = auth
+        # 复用连接，避免每次网关调用都重新握手 TLS。
+        self._session = requests.Session()
         self.auth.require_valid()
         if not self.auth.app_key or not self.auth.user_id:
             self.auth.validate(fetch_profile=True)
             self.auth.save()
+
+    @property
+    def space(self) -> 'SpaceClient':
+        """同一份凭证下的云空间/云文档接口。"""
+        from .space import SpaceClient
+        return SpaceClient(self.auth)
 
     def build_ws_url(self) -> str:
         device_id = self.auth.device_id
@@ -148,8 +162,8 @@ class LarkClient:
             'x-request-id': generate_long_request_id(),
         }
         try:
-            resp = requests.post(self.auth.region.gateway_url, headers=headers, cookies=self.auth.cookies,
-                                 data=packet.SerializeToString(), timeout=15)
+            resp = self._session.post(self.auth.region.gateway_url, headers=headers, cookies=self.auth.cookies,
+                                      data=packet.SerializeToString(), timeout=15)
             resp.raise_for_status()
         except requests.HTTPError as e:
             raise HttpError(str(e)) from e
@@ -185,6 +199,10 @@ class LarkClient:
 
     def _send_packet(self, pkt, packet_cid: str) -> str:
         content = self._gateway_post(pkt)
+        resp = P.Packet()
+        resp.ParseFromString(content)
+        if resp.status:
+            raise ProtocolError(f'飞书命令 {pkt.cmd} 失败: status={resp.status}')
         try:
             msg_id = builders.decode_put_message_response(content)
         except Exception as e:
@@ -192,19 +210,6 @@ class LarkClient:
         if not msg_id:
             raise SendUnconfirmed('服务端已接受发送请求，但响应里没有消息 id', packet_cid)
         return msg_id
-
-    def document_by_url(self, url: str) -> dict:
-        """按文档 URL 解析出文档信息（含 token）；wiki 链接也支持。"""
-        resp = self.api('docs.PullDocByURLsRequest', {'urls': [str(url)]})
-        docs = (resp or {}).get('docs') or {}
-        info = docs.get(str(url))
-        if not info:
-            raise ValueError(f'无法解析文档 URL: {url}')
-        return info
-
-    def search(self, query: str):
-        pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)
-        return builders.decode_search_response(self._gateway_post(pkt))
 
     def create_group_chat(self, member_ids, group_name: str=None, description: str=None,
                           cid: str=None) -> str:
@@ -222,13 +227,6 @@ class LarkClient:
         """和某个用户的单聊：已有则返回原会话，没有则服务端新建。"""
         response = self.api("chats.PutChatRequest", {"type": 1, "chatterIds": [str(user_id)]})
         return str(((response or {}).get("chat") or {}).get("id") or "")
-
-    def get_user_name(self, user_id: str, chat_id: str):
-        try:
-            pkt = builders.build_user_info_packet(str(user_id), str(chat_id), generate_long_request_id())
-            return builders.decode_user_info_response(self._gateway_post(pkt), self.auth.region.locale)
-        except Exception:
-            return None
 
     def recall_message(self, msg_id: str) -> None:
         """撤回消息；服务端没有明确返回 ok 时不视为成功。"""
@@ -253,13 +251,6 @@ class LarkClient:
             data['messageIds'] = [str(m) for m in message_ids]
         return self.api('messages.PutReadMessagesRequest', data)
 
-    def get_group_name(self, chat_id: str):
-        try:
-            pkt = builders.build_group_info_packet(str(chat_id), generate_long_request_id())
-            return builders.decode_group_info_response(self._gateway_post(pkt))
-        except Exception:
-            return None
-
     def api(self, type_or_cmd, data: dict=None, raw: bytes=None):
         from .proto import gateway
         cmd, req_cls, resp_cls = gateway.resolve_cmd(type_or_cmd)
@@ -270,32 +261,49 @@ class LarkClient:
         content = self._gateway_post(pkt)
         resp_pkt = P.Packet()
         resp_pkt.ParseFromString(content)
+        if resp_pkt.status:
+            raise ProtocolError(f'飞书命令 {type_or_cmd} 失败: status={resp_pkt.status}')
         if resp_cls is not None and resp_pkt.payload:
             return gateway.response_to_dict(resp_cls, resp_pkt.payload)
         from protobuf_to_dict import protobuf_to_dict
         return protobuf_to_dict(resp_pkt)
 
-    def get_chat_info(self, chat_id: str):
-        resp = self.api('chats.PullChatsByIdsRequest', {'chatIds': [str(chat_id)]})
-        chats = (resp or {}).get('chats') or {}
-        for _, chat in chats.items():
-            return chat
-        return None
+    # ---------- 通用查询 ----------
 
-    def pull_history(self, chat_id: str, positions, save_storage=None):
-        resp = self.api('messages.PullMessagesByPositionsRequest', {'chatId': str(chat_id), 'positions': [int(p) for p in positions]})
-        messages = (resp or {}).get('messages') or {}
-        out = []
-        for pos_key, v in sorted(messages.items(), key=lambda kv: int(kv[0])):
-            message_type = decoders.enum_to_int(v.get('type', 0))
-            chat_type = decoders.enum_to_int(v.get('chatType', 0))
-            summary, data = decoders.decode_message_content(message_type, v.get('content', b''))
-            root_id = v.get('rootId') or ''
-            msg = {'msg_id': v.get('id'), 'msg_type': message_type, 'msg_type_name': decoders.MSG_TYPE_NAMES.get(message_type, str(message_type)), 'from_id': v.get('fromId'), 'chat_id': v.get('chatId') or v.get('channelId') or str(chat_id), 'chat_type': chat_type, 'chat_type_name': decoders.CHAT_TYPE_NAMES.get(chat_type, str(chat_type)), 'at_me': False, 'root_id': root_id, 'parent_id': v.get('parentId') or '', 'cid': v.get('cid') or '', 'position': v.get('position') or int(pos_key), 'create_time': v.get('createTime'), 'content': summary, 'content_data': data, **decoders.message_flags(v)}
-            out.append(msg)
-            if save_storage is not None:
-                try:
-                    save_storage.save_message(msg)
-                except Exception:
-                    pass
-        return out
+    def pull_chats(self, chat_ids: list[str]) -> dict:
+        """按 chat_id 取会话信息：群名、会话类型、单聊的 key（两个成员 id）等。"""
+        response = self.api('chats.PullChatsByIdsRequest', {'chatIds': [str(c) for c in chat_ids]})
+        return dict((response or {}).get('chats') or {})
+
+    def pull_feed(self, count: int = 50, cursor: int | None = None) -> dict:
+        """收件箱：最近会话和消息。cursor 传上一页的 next_cursor 取更早的一页。"""
+        data = {'type': 1, 'pullFeedType': 2, 'businessType': 1, 'count': int(count)}
+        if cursor:
+            data['pullType'] = 2
+            data['cursor'] = int(cursor)
+        else:
+            data['pullType'] = 1
+        return self.api('feed.PullFeedCardsRequest', data) or {}
+
+    def pull_chatter_names(self, user_ids: list[str]) -> dict:
+        """批量取用户昵称：user_id -> 昵称。chatId 传 0 表示不限会话。"""
+        response = self.api('chats.PullChatChattersByIDsRequest',
+                            {'chatId': 0, 'chatterIds': [int(u) for u in user_ids], 'needChatters': True})
+        return {str(key): str(value.get('name') or '')
+                for key, value in ((response or {}).get('chatters') or {}).items()}
+
+    def get_user_profile(self, user_id: str) -> dict | None:
+        """单个用户资料（姓名、邮箱、英文名、部门）；查不到返回 None。"""
+        response = self.api('users.PullUserProfileRequest', {'targetUserId': str(user_id)})
+        if not response or not response.get('name'):
+            return None
+        return response
+
+    def search_user_ids_by_email(self, email: str) -> list[str]:
+        """按完整邮箱精确查人，返回匹配到的飞书数字 user id（可能多个）。"""
+        response = self.api('calendarevents.SearchUserByEmailCalendarRequest',
+                            {'ContactContents': [email]})
+        entities = (response or {}).get('entitiesInfos') or {}
+        found = [value for key, value in entities.items() if key.casefold() == email.casefold()]
+        return [str(entity.get('entityId')) for value in found
+                for entity in (value.get('entityInfo') or []) if entity.get('entityType') == 1]

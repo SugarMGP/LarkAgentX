@@ -1,5 +1,7 @@
 import os
 import re
+from urllib.parse import urlsplit
+
 import requests
 from loguru import logger
 from .auth import LarkAuth
@@ -50,37 +52,22 @@ def upload_file(auth: LarkAuth, chat_id: str, data: bytes, name: str) -> dict:
     return out
 
 
-def message_resource_url(msg_id: str, key: str, chat_id: str, host: str=None) -> str:
-    """host 为所属区域的文件主机(LarkAuth.region.file_host),不传时取 LARKX_REGION。"""
-    host = host or get_region(load_config()['region']).file_host
-    return f'{host}/download/messages/{msg_id}/keys/{key}?chat_id={chat_id}'
-
-
-def extract_resource_key(msg_type: int, content_data: dict) -> str:
-    if not content_data:
-        return ''
-    if msg_type == 5:
-        v2 = content_data.get('imageV2') or {}
-        if v2.get('imageKey'):
-            return v2['imageKey']
-        img = (content_data.get('image') or {}).get('origin') or {}
-        return img.get('key') or (content_data.get('image') or {}).get('imageKey', '')
-    if msg_type in (3, 15, 7, 10):
-        return content_data.get('key', '')
-    return ''
-
-
 def download(auth: LarkAuth, url: str, out_path: str=None, max_bytes: int=200 * 1024 * 1024):
-    with requests.get(url, cookies=auth.cookies, timeout=60, stream=True) as r:
+    """下载文件。登录 cookie 只发给本区域（feishu.cn / larksuite.com）的地址。"""
+    host = urlsplit(url).netloc.lower()
+    same_region = host == auth.region.domain or host.endswith('.' + auth.region.domain)
+    with requests.get(url, cookies=auth.cookies if same_region else {}, timeout=60, stream=True) as r:
         r.raise_for_status()
         content_type = r.headers.get('content-type', '')
         if not out_path:
-            buf = b''
+            chunks = []
+            size = 0
             for chunk in r.iter_content(1 << 16):
-                buf += chunk
-                if len(buf) > max_bytes:
+                size += len(chunk)
+                if size > max_bytes:
                     raise ValueError('文件过大')
-            return (buf, content_type)
+                chunks.append(chunk)
+            return (b''.join(chunks), content_type)
         n = 0
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         with open(out_path, 'wb') as f:
@@ -90,12 +77,3 @@ def download(auth: LarkAuth, url: str, out_path: str=None, max_bytes: int=200 * 
                 if n > max_bytes:
                     raise ValueError('文件过大')
         return (out_path, content_type, n)
-
-
-def download_message_resource(auth: LarkAuth, msg: dict, out_path: str=None, max_bytes: int=200 * 1024 * 1024):
-    key = extract_resource_key(msg.get('msg_type', 0), msg.get('content_data') or {})
-    if not key:
-        raise ValueError('该消息没有可下载的资源')
-    url = message_resource_url(msg['msg_id'], key, msg['chat_id'], host=auth.region.file_host)
-    logger.info(f'下载资源: {url}')
-    return download(auth, url, out_path, max_bytes=max_bytes)

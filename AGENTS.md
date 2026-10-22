@@ -46,6 +46,19 @@ IM 网关：
 | `feed.PullFeedCardsRequest` | 1000 | 收件箱（最近会话 + 消息），`pullType=1` 第一页、`pullType=2`+cursor 翻页 |
 | `chats.PullChatChattersRequest` | 44 | 群成员（单个会话） |
 
+`LarkClient` 已经封好的通用方法（下游直接用，不要自己拼 `client.api`）：
+
+| 方法 | 用途 |
+|---|---|
+| `pull_chats(chat_ids)` | 按 chat_id 批量取会话信息，返回 `{chat_id: 会话}` |
+| `pull_feed(count, cursor)` | 收件箱：最近会话 + 消息；cursor 传上一页的 next_cursor |
+| `pull_chatter_names(user_ids)` | 批量取昵称 `{user_id: 昵称}`（`chatId` 传 0，不限会话） |
+| `get_user_profile(user_id)` | 单个用户资料（姓名/邮箱/英文名/部门），查不到返回 None |
+| `search_user_ids_by_email(email)` | 按完整邮箱精确查人，返回命中的数字 user id 列表 |
+| `client.space` | 同一份凭证下的 `SpaceClient`（云空间/文档） |
+
+协议层的错误语义都在库里：`api()` 遇到 `status != 0` 抛 `ProtocolError`；空间接口的 HTTP 错误统一抛 `SpaceError`；`validate()` 里网络异常向上抛，不会被当成"凭证过期"。
+
 云空间/文档：
 
 | 接口 | 用途 |
@@ -84,7 +97,12 @@ IM 网关：
 - `GET /space/api/explorer/root/` → 返回 `{"code":0,"data":{}}`，空的，拿不到根目录 token（要从 children/list 里找）。
 - `GET /space/api/explorer/root/get/`、`/explorer/v2/root_folder/meta/` → 不是 404 页面就是 HTML，没有这个接口。
 - `chats.PullChatChattersByIDsRequest` 只按 `chatterIds` 批量，`chatId` 传 0 就行，不用给真实会话。
-- **没有"改已有文档正文"的 HTTP 接口**：文档编辑走编辑器的 box-stream 私有同步协议（WebSocket + OT 操作），`space.py` 里还没封装。导入只能**新建**文档，不能覆盖已有文档。
+- **没有"改已有文档正文"的 HTTP 接口**：文档编辑走编辑器的 box-stream 私有同步协议（WebSocket + OT 操作），`space.py` 里还没封装。导入只能**新建**文档，不能覆盖已有文档。要改文档正文用 `lark-cli docs +update`（开放平台身份），不要在库里另造一套。
+- `users.BatchPullUserProfileRequest` 和 `users.SearchUsersByContactPointRequest` 一样只回空包；`users.PullUserProfileRequest`（单个）和 `calendarevents.SearchUserByEmailCalendarRequest`（按邮箱索引）能用。
+
+## 不要留没人用的封装
+
+`LarkClient` 的方法如果只有自己那半个调用方在用，就是负债：会烂掉，还会被下��当成可用能力直接调。删掉比留着好。判断"没人用"要 grep 整个仓库（含 tests）和下游仓库。
 
 ## 真账号验证
 
