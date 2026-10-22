@@ -23,7 +23,8 @@ def auth_stub():
     return SimpleNamespace(
         cookies={"session": "x"},
         gateway_app_id="161471",
-        region=SimpleNamespace(domain="feishu.cn", internal_api_host="https://internal-api.feishu.cn"),
+        region=SimpleNamespace(domain="feishu.cn", internal_api_host="https://internal-api.feishu.cn",
+                               space_api_host="https://internal-api-space.feishu.cn"),
     )
 
 
@@ -150,3 +151,38 @@ def test_document_blocks_merges_table_cells(monkeypatch):
     data = SpaceClient(auth_stub()).document_blocks("T1")
     assert "cell" in data["block_map"]
     assert calls[1]["mode"] == 4 and calls[1]["block_id"] == "t"
+
+
+def test_import_markdown_uploads_then_polls(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url.rsplit("/space/api/", 1)[-1], kwargs))
+        if url.endswith("upload/prepare/"):
+            body = {"code": 0, "data": {"upload_id": "u1", "block_size": 2, "num_blocks": 2}}
+        elif url.endswith("merge_block/"):
+            body = {"code": 0, "data": {"success_seq_list": [0, 1]}}
+        elif url.endswith("upload/finish/"):
+            body = {"code": 0, "data": {"file_token": "ft1"}}
+        else:
+            body = {"code": 0, "data": {"ticket": "tk1", "job_timeout": 600}}
+        return FakeResponse(body)
+
+    def fake_get(url, **kwargs):
+        calls.append((url.rsplit("/space/api/", 1)[-1], kwargs))
+        return FakeResponse({"code": 0, "data": {"result": {"token": "doc1", "url": "u1"}}})
+
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.time.sleep", lambda *_: None)
+
+    out = SpaceClient(auth_stub()).import_markdown("# hi", "wiki-node", name="报告.md")
+
+    assert out == {"token": "doc1", "url": "u1", "type": ""}
+    assert [name for name, _ in calls] == [
+        "box/upload/prepare/", "box/stream/upload/merge_block/", "box/upload/finish/",
+        "import/create/", "import/result/tk1",
+    ]
+    create = calls[3][1]["data"]
+    assert '"type":"docx"' in create and '"mount_type":2' in create
+    assert '"mount_key":"wiki-node"' in create and '"event_source":"6"' in create

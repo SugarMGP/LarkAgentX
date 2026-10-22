@@ -1,6 +1,6 @@
 [project]
 name = "larkx"
-version = "2.7.0"
+version = "2.8.0"
 description = "LarkX core client for Feishu web protocol"
 authors = [{ name = "SugarMGP", email = "2350745751@qq.com" }]
 readme = "README.md"
