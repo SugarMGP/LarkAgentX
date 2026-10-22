@@ -7,10 +7,11 @@ from larkx.space import SpaceClient, SpaceError, _blocks_to_markdown
 
 
 class FakeResponse:
-    def __init__(self, body, status=200):
+    def __init__(self, body, status=200, cookies=None):
         self._body = body
         self.status_code = status
         self.text = str(body)
+        self.cookies = cookies or {}
 
     def raise_for_status(self):
         return None
@@ -186,3 +187,54 @@ def test_import_markdown_uploads_then_polls(monkeypatch):
     create = calls[3][1]["data"]
     assert '"type":"docx"' in create and '"mount_type":2' in create
     assert '"mount_key":"wiki-node"' in create and '"event_source":"6"' in create
+
+
+def test_root_token_picks_space_root(monkeypatch):
+    body = {"code": 0, "data": {"entities": {"nodes": {
+        "n1": {"name": "文档", "type": 22, "token": "nodcn1", "obj_token": "doc1"},
+        "n2": {"name": "我的空间", "type": 4, "token": "root1", "obj_token": "root1"},
+    }}}}
+    monkeypatch.setattr("larkx.space.requests.get", lambda url, **kwargs: FakeResponse(body))
+    assert SpaceClient(auth_stub()).root_token() == "root1"
+
+
+def test_root_token_missing_root_raises(monkeypatch):
+    body = {"code": 0, "data": {"entities": {"nodes": {
+        "n1": {"name": "文档", "type": 22, "token": "nodcn1", "obj_token": "doc1"},
+    }}}}
+    monkeypatch.setattr("larkx.space.requests.get", lambda url, **kwargs: FakeResponse(body))
+    with pytest.raises(SpaceError, match="根目录"):
+        SpaceClient(auth_stub()).root_token()
+
+
+def test_add_member_posts_editable_owners_with_csrf(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {"entities": {"nodes": {}}}},
+                            cookies={"_csrf_token": "csrf1"})
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse({"code": 0, "data": {"success_count": 2}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+
+    SpaceClient(auth_stub()).add_member("doc1", ["u1", "u2"])
+
+    url, kwargs = calls[0]
+    assert url.endswith("/space/api/suite/permission/members/create/")
+    assert kwargs["headers"]["X-CSRFToken"] == "csrf1"
+    assert kwargs["data"]["owners"] == '[{"owner_id":"u1","owner_type":1,"permission":4},{"owner_id":"u2","owner_type":1,"permission":4}]'
+    assert kwargs["data"]["notify_lark"] == "0"
+
+
+def test_add_member_raises_when_not_all_granted(monkeypatch):
+    monkeypatch.setattr("larkx.space.requests.get",
+                        lambda url, **kwargs: FakeResponse({"code": 0, "data": {}},
+                                                         cookies={"_csrf_token": "csrf1"}))
+    monkeypatch.setattr("larkx.space.requests.post",
+                        lambda url, **kwargs: FakeResponse({"code": 0, "data": {"success_count": 0}}))
+    with pytest.raises(SpaceError, match="加协作者失败"):
+        SpaceClient(auth_stub()).add_member("doc1", ["u1"])

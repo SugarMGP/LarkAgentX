@@ -5,19 +5,19 @@
 路径来自文档页内嵌配置和前端 JS 里的接口表。
 
 已用真实账号验证的能力：
-- GET  /space/api/explorer/v3/children/list/          我的云空间文件列表
+- GET  /space/api/explorer/v3/children/list/          我的云空间文件列表（含"我的空间"根目录节点）
 - GET  /space/api/explorer/folder/children/            某个目录下的文件
-- GET  /space/api/explorer/root/                       云空间根目录
 - GET  /space/api/wiki/v2/tree/get_node/               wiki 节点 → 真实文档 token
 - GET  /space/api/docx/pages/client_vars               文档正文（块）
 - POST /space/api/box/upload/prepare|finish + box/stream/upload/merge_block   上传文件
 - POST /space/api/import/create + GET import/result   上传的文件转成在线文档
+- POST /space/api/suite/permission/members/create/     给文档加协作者
 
 导入文档那套 box 接口在文档服务上，只用登录 cookie 就能写，不需要 CSRF。
-云空间的增删改移动（建目录、删文件、改名等）走 internal-api 的 explorer 接口，
+云空间的增删改移动（建目录、删文件、改名等）和加协作者走 explorer/suite 接口，
 要额外带 X-CSRFToken（值是 _csrf_token cookie，任意一次 space/api 读接口的响应
-就会下发它），暂时没有封装。编辑已有文档的正文走编辑器的 box-stream 私有同步
-协议，也没有封装。
+就会下发它），已封装。编辑已有文档的正文走编辑器的 box-stream 私有同步协议，
+没有封装。
 """
 from __future__ import annotations
 
@@ -37,6 +37,10 @@ _URL_RE = re.compile(r"^(https?:|mailto:|tel:|/)", re.I)
 _CSS_COLOR_RE = re.compile(r"^(#[0-9a-f]{3,8}|rgba?\(|hsla?\()", re.I)
 _LISTS = ("bullet", "ordered", "todo")
 _HEADINGS = {"heading1": 1, "heading2": 2, "heading3": 3, "heading4": 4, "heading5": 5, "heading6": 6}
+# 协作者权限位（飞书位掩码）：可阅读 1、可评论 2、可编辑 4
+PERM_READABLE = 1
+PERM_COMMENTABLE = 2
+PERM_EDITABLE = 4
 
 
 class SpaceError(RuntimeError):
@@ -286,13 +290,26 @@ class SpaceClient:
 
     def __init__(self, auth: LarkAuth):
         self.auth = auth
+        self._csrf = ''
 
     def _get(self, path: str, host: str = '', **params) -> dict:
         url = f'{host or self.auth.region.internal_api_host}{path}'
         response = requests.get(url, params=params, cookies=self.auth.cookies,
                                 headers=self._headers(), timeout=30)
         response.raise_for_status()
+        self._remember_csrf(response)
         return _unwrap(path, response.json())
+
+    def _remember_csrf(self, response) -> None:
+        """记下 _csrf_token：写操作要带的 X-CSRFToken 就是它，读接口的响应会下发。"""
+        token = response.cookies.get('_csrf_token')
+        if token:
+            self._csrf = token
+
+    def _csrf_headers(self) -> dict:
+        if not self._csrf:
+            self._get('/space/api/explorer/v3/children/list/', host=self.auth.region.space_api_host)
+        return {'X-CSRFToken': self._csrf}
 
     def _post(self, path: str, *, host: str = '', json_body=None, data=None, params: dict = '',
               content_type: str = '', headers: dict = '', timeout: int = 30) -> dict:
@@ -389,6 +406,14 @@ class SpaceClient:
         nodes = ((data.get('entities') or {}).get('nodes') or {})
         return list(nodes.values())
 
+    def root_token(self) -> str:
+        """我的云空间根目录 token：导入文档默认落在这里。"""
+        for node in self.files():
+            # 根目录节点的 token 和 obj_token 相同；普通子节点的节点 token 与对象 token 不同。
+            if node.get('type') == 4 and node.get('token') == node.get('obj_token'):
+                return str(node.get('token') or '')
+        raise SpaceError('未找到云空间根目录')
+
     def folder_children(self, folder_token: str) -> list[dict]:
         """某个目录下的文件。"""
         data = self._get('/space/api/explorer/folder/children/', folder_token=folder_token)
@@ -442,3 +467,22 @@ class SpaceClient:
         block_map = data.get('block_map') or {}
         sequence = [str(x) for x in (data.get('block_sequence') or [])]
         return _blocks_to_markdown(block_map, sequence)
+
+    # ---------- 协作权限 ----------
+
+    def add_member(self, token: str, user_ids: list[str], permission: int = PERM_EDITABLE,
+                   obj_type: int = 22) -> dict:
+        """给文档加协作者：user_ids 是飞书数字 user id，permission 是权限位掩码。
+
+        只有文档所有者能加协作者。这里 notify_lark=0 表示不通知对方，
+        链接由调用方自己发出去。
+        """
+        owners = [{'owner_id': user_id, 'owner_type': 1, 'permission': permission} for user_id in user_ids]
+        result = self._post('/space/api/suite/permission/members/create/',
+                             data={'token': token, 'type': str(obj_type), 'owners': _dumps(owners),
+                                   'notify_lark': '0', 'send_lark_im': 'false', 'lark_im_text': ''},
+                             content_type='application/x-www-form-urlencoded',
+                             headers=self._csrf_headers())
+        if (result.get('success_count') or 0) != len(user_ids):
+            raise SpaceError(f'加协作者失败: {result}')
+        return result
