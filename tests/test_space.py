@@ -238,3 +238,19 @@ def test_add_member_raises_when_not_all_granted(monkeypatch):
                         lambda url, **kwargs: FakeResponse({"code": 0, "data": {"success_count": 0}}))
     with pytest.raises(SpaceError, match="加协作者失败"):
         SpaceClient(auth_stub()).add_member("doc1", ["u1"])
+
+
+def test_search_user_returns_candidates(monkeypatch):
+    body = {"code": 0, "data": {"candidates": [{"owner_id": "u1", "owner_name": "张三", "owner_type": 1}]}}
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["params"] = kwargs.get("params")
+        return FakeResponse(body)
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    out = SpaceClient(auth_stub()).search_user("san@dewu.com")
+    assert out == [{"owner_id": "u1", "owner_name": "张三", "owner_type": 1}]
+    assert captured["url"].endswith("/space/api/search/permission_candidates/")
+    assert captured["params"] == {"query": "san@dewu.com"}
