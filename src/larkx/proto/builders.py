@@ -14,10 +14,18 @@ def wrap_packet(cmd: int, payload_msg, request_id: str) -> P.Packet:
 
 
 def build_message_request(msg_type: int, chat_id: str, text: str = '', reply_to: str = None,
-                          cid: str = None) -> P.PutMessageRequest:
-    """组装一条消息请求；要自己往正文里插真实 AT 节点时用这个。"""
-    req = _new_message_request(msg_type, chat_id, cid)
-    _set_reply(req, reply_to)
+                          cid: str = None):
+    """组装一条消息请求；用的是完整协议类型，调用方可以再往正文里插真实 AT 节点。"""
+    from . import lark_all_pb2 as L
+    req = L.messages.PutMessageRequest()
+    req.type = msg_type
+    req.chatId = str(chat_id)
+    req.cid = str(cid) if cid else generate_request_cid()
+    req.isNotified = 1
+    req.version = 1
+    if reply_to:
+        req.rootId = str(reply_to)
+        req.parentId = str(reply_to)
     if text:
         fill_text_rich_text(req.content.richText, text)
     return req
