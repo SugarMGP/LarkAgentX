@@ -163,6 +163,27 @@ class LarkClient:
         pkt = builders.build_send_message_packet(
             text, str(chat_id), generate_long_request_id(), reply_to=reply_to, cid=packet_cid,
         )
+        return self._send_packet(pkt, packet_cid)
+
+    def send_image(self, chat_id: str, image_key: str, cid: str=None, reply_to: str=None):
+        """发送图片；image_key 由 media.upload_image 上传得到；cid 是幂等键。"""
+        packet_cid = cid or generate_request_cid()
+        pkt = builders.build_image_message_packet(
+            str(image_key), str(chat_id), generate_long_request_id(), reply_to=reply_to, cid=packet_cid,
+        )
+        return self._send_packet(pkt, packet_cid)
+
+    def send_file(self, chat_id: str, file_key: str, file_name: str, file_size: int, file_mime: str,
+                  cid: str=None, reply_to: str=None):
+        """发送文件；文件先经 media.upload_file 上传到该会话；cid 是幂等键。"""
+        packet_cid = cid or generate_request_cid()
+        pkt = builders.build_file_message_packet(
+            str(file_key), str(file_name), int(file_size), str(file_mime), str(chat_id),
+            generate_long_request_id(), reply_to=reply_to, cid=packet_cid,
+        )
+        return self._send_packet(pkt, packet_cid)
+
+    def _send_packet(self, pkt, packet_cid: str) -> str:
         content = self._gateway_post(pkt)
         try:
             msg_id = builders.decode_put_message_response(content)

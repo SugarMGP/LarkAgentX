@@ -72,10 +72,29 @@ def extract_rich_text(rich_text_dict):
                         continue
                 except Exception:
                     pass
+            if tag == 6:
+                link = _extract_link(prop)
+                if link:
+                    text += link
+                    continue
             text += TAG_PLACEHOLDERS.get(tag, '')
     except Exception:
         pass
     return text
+
+
+def _extract_link(prop: bytes) -> str:
+    """链接元素：href 是地址，content 是显示文字；两者都有时按 文字(地址) 拼。"""
+    from . import lark_all_pb2
+    anchor = lark_all_pb2.entities.RichTextElement.AnchorProperty()
+    try:
+        anchor.ParseFromString(prop)
+    except Exception:
+        return '[链接]'
+    href, label = anchor.href, anchor.content
+    if href and label and label != href:
+        return f'{label}({href})'
+    return href or label or '[链接]'
 
 
 def decode_message_content(message_type, content_bytes):
