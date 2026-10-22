@@ -197,6 +197,16 @@ class LarkClient:
         )
         return self._send_packet(pkt, packet_cid)
 
+    def send_message_request(self, request, cid: str=None) -> str:
+        """发送一个已经组装好的 PutMessageRequest；要在正文里插真实 AT 节点时用这个。
+
+        request 是 larkx.proto.proto_pb2.PutMessageRequest，cid 是幂等键。
+        """
+        packet_cid = cid or generate_request_cid()
+        request.cid = str(packet_cid)
+        pkt = builders.wrap_packet(5, request, generate_long_request_id())
+        return self._send_packet(pkt, packet_cid)
+
     def _send_packet(self, pkt, packet_cid: str) -> str:
         content = self._gateway_post(pkt)
         resp = P.Packet()
@@ -291,6 +301,12 @@ class LarkClient:
                             {'chatId': 0, 'chatterIds': [int(u) for u in user_ids], 'needChatters': True})
         return {str(key): str(value.get('name') or '')
                 for key, value in ((response or {}).get('chatters') or {}).items()}
+
+    def pull_messages_by_positions(self, chat_id: str, positions: list[int]) -> dict:
+        """按 position 窗口取消息，返回 {position: 消息}。"""
+        response = self.api('messages.PullMessagesByPositionsRequest',
+                            {'chatId': str(chat_id), 'positions': [int(p) for p in positions]})
+        return dict((response or {}).get('messages') or {})
 
     def get_user_profile(self, user_id: str) -> dict | None:
         """单个用户资料（姓名、邮箱、英文名、部门）；查不到返回 None。"""

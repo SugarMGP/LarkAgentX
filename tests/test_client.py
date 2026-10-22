@@ -172,3 +172,22 @@ def test_search_user_ids_by_email_only_keeps_exact_match(monkeypatch):
     monkeypatch.setattr(c, "api", api)
     assert c.search_user_ids_by_email("san@dewu.com") == ["123"]
     assert c.search_user_ids_by_email("SAN@DEWU.COM") == ["123"]
+
+
+def test_send_message_request_sends_a_prepared_request(monkeypatch):
+    c = make_client(monkeypatch)
+    packets = []
+
+    def post(packet):
+        packets.append(packet)
+        return P.Packet().SerializeToString()
+
+    monkeypatch.setattr(c, "_gateway_post", post)
+    request = P.PutMessageRequest()
+    request.type = 4
+    request.chatId = "c1"
+    with pytest.raises(Exception):
+        c.send_message_request(request, cid="fixed")
+    sent = P.PutMessageRequest()
+    sent.ParseFromString(packets[0].payload)
+    assert (sent.chatId, sent.cid) == ("c1", "fixed")

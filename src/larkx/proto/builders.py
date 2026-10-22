@@ -13,6 +13,16 @@ def wrap_packet(cmd: int, payload_msg, request_id: str) -> P.Packet:
     return pkt
 
 
+def build_message_request(msg_type: int, chat_id: str, text: str = '', reply_to: str = None,
+                          cid: str = None) -> P.PutMessageRequest:
+    """组装一条消息请求；要自己往正文里插真实 AT 节点时用这个。"""
+    req = _new_message_request(msg_type, chat_id, cid)
+    _set_reply(req, reply_to)
+    if text:
+        fill_text_rich_text(req.content.richText, text)
+    return req
+
+
 def build_send_message_packet(text: str, chat_id: str, request_id: str,
                               reply_to: str=None, cid: str=None) -> P.Packet:
     """发文字。reply_to 是引用回复：rootId=parentId=被回复消息，且不设 isReplyInThread，
