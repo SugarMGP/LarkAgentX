@@ -470,12 +470,6 @@ class SpaceClient:
 
     # ---------- 协作权限 ----------
 
-    def search_user(self, query: str) -> list[dict]:
-        """按关键词搜租户里的人/群，候选带 owner_id、owner_name。"""
-        data = self._get('/space/api/search/permission_candidates/',
-                         host=self.auth.region.space_api_host, query=query)
-        return list(data.get('candidates') or [])
-
     def add_member(self, token: str, user_ids: list[str], permission: int = PERM_EDITABLE,
                    obj_type: int = 22) -> dict:
         """给文档加协作者：user_ids 是飞书数字 user id，permission 是权限位掩码。
