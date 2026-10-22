@@ -21,17 +21,45 @@ def rich_text(*elements) -> dict:
     return {"elementIds": element_ids, "elements": {"dictionary": dictionary}}
 
 
-def test_link_element_is_rendered_with_url_and_text():
+def test_link_element_is_rendered_as_markdown():
     text = decoders.extract_rich_text(rich_text(
         (1, P.TextProperty(content="看看这个").SerializeToString()),
         (6, anchor("https://example.com/a", "文档")),
     ))
-    assert text == "看看这个文档(https://example.com/a)"
+    assert text == "看看这个[文档](https://example.com/a)"
 
 
 def test_link_without_different_text_shows_url_only():
     text = decoders.extract_rich_text(rich_text((6, anchor("https://example.com/b", "https://example.com/b"))))
     assert text == "https://example.com/b"
+
+
+def test_rich_text_element_types_are_all_rendered():
+    elements = [
+        (1, P.TextProperty(content="普通").SerializeToString()),
+        (7, L.entities.RichTextElement.BoldProperty(content="粗").SerializeToString()),
+        (8, L.entities.RichTextElement.ItalicProperty(content="斜").SerializeToString()),
+        (9, L.entities.RichTextElement.UnderlineProperty(content="下划").SerializeToString()),
+        (5, P.AtProperty(userId="u1", content="@张三").SerializeToString()),
+        (36, L.entities.RichTextElement.MentionProperty(content="提及").SerializeToString()),
+        (47, L.entities.RichTextElement.AtUserGroupProperty(
+            userGroupId=1, defaultGroupName="群").SerializeToString()),
+        (49, L.entities.RichTextElement.MarkdownProperty(content="**md**").SerializeToString()),
+        (31, L.entities.RichTextElement.CodeBlockProperty(
+            language=1, content="code()").SerializeToString()),
+    ]
+    text = decoders.extract_rich_text(rich_text(*elements))
+    assert text == "普通**粗***斜*下划@张三提及@群**md**code()"
+
+
+def test_media_elements_use_placeholders():
+    text = decoders.extract_rich_text(rich_text(
+        (2, b"\x12\x08img-key"),
+        (10, L.entities.RichTextElement.EmotionProperty(key="e1").SerializeToString()),
+        (18, L.entities.RichTextElement.MediaProperty(key="k", name="v.mp4").SerializeToString()),
+        (22, L.entities.RichTextElement.DocsProperty().SerializeToString()),
+    ))
+    assert text == "[图片][表情][视频][文档]"
 
 
 def test_image_and_file_packets_carry_the_uploaded_keys():

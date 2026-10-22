@@ -1,5 +1,14 @@
 from protobuf_to_dict import protobuf_to_dict
 from . import proto_pb2 as P
+
+TAG_PLACEHOLDERS = {2: '[图片]', 10: '[表情]', 18: '[视频]', 22: '[文档]'}
+# 富文本元素 tag -> 取文本内容的属性类（tag 见 entities.RichTextElement.Tag）
+_CONTENT_CLASSES = {
+    1: 'TextProperty', 5: 'AtProperty', 7: 'BoldProperty', 8: 'ItalicProperty',
+    9: 'UnderlineProperty', 30: 'CodeProperty', 31: 'CodeBlockProperty',
+    36: 'MentionProperty', 37: 'CodeBlockV2Property', 49: 'MarkdownProperty',
+}
+_LARK_ALL = None
 MSG_TYPE_NAMES = {
     0: 'UNKNOWN', 2: 'POST', 3: 'FILE', 4: 'TEXT', 5: 'IMAGE', 6: 'SYSTEM',
     7: 'AUDIO', 8: 'EMAIL', 9: 'SHARE_GROUP_CHAT', 10: 'STICKER',
@@ -35,66 +44,108 @@ def message_flags(message: dict) -> dict:
 
 
 def extract_rich_text(rich_text_dict):
-    TAG_PLACEHOLDERS = {2: '[图片]', 5: '[@]', 10: '[表情]', 18: '[视频]', 22: '[文档]'}
+    """把富文本渲染成 markdown 风格的纯文本：文字照旧，链接渲染成 [文字](地址)。"""
     text = ''
     try:
         dictionary = rich_text_dict['elements']['dictionary']
         element_ids = rich_text_dict.get('elementIds') or []
         if element_ids:
+            listed = set(element_ids)
             ordered = [(k, dictionary[k]) for k in element_ids if k in dictionary]
-            ordered += [(k, v) for k, v in dictionary.items() if k not in set(element_ids)]
+            ordered += [(k, v) for k, v in dictionary.items() if k not in listed]
         else:
             try:
                 ordered = sorted(dictionary.items(), key=lambda item: int(item[0]))
             except Exception:
                 ordered = list(dictionary.items())
         for k, v in ordered:
-            tag = v.get('tag', 1)
-            prop = v.get('property')
-            if not prop:
-                continue
-            if tag in (1, 3, 7, 8, 9, 17):
-                tp = P.TextProperty()
-                try:
-                    tp.ParseFromString(prop)
-                    text += tp.content
-                    if tag == 3:
-                        text += '\n'
-                    continue
-                except Exception:
-                    pass
-            if tag == 5:
-                ap = P.AtProperty()
-                try:
-                    ap.ParseFromString(prop)
-                    if ap.content:
-                        text += ap.content
-                        continue
-                except Exception:
-                    pass
-            if tag == 6:
-                link = _extract_link(prop)
-                if link:
-                    text += link
-                    continue
-            text += TAG_PLACEHOLDERS.get(tag, '')
+            text += _render_element(v.get('tag', 1), v.get('property'))
     except Exception:
         pass
     return text
 
 
-def _extract_link(prop: bytes) -> str:
-    """链接元素：href 是地址，content 是显示文字；两者都有时按 文字(地址) 拼。"""
-    from . import lark_all_pb2
-    anchor = lark_all_pb2.entities.RichTextElement.AnchorProperty()
+def _render_element(tag: int, prop) -> str:
+    """按元素类型渲染。tag 见 entities.RichTextElement.Tag。"""
+    if tag in TAG_PLACEHOLDERS:
+        return TAG_PLACEHOLDERS[tag]
+    if not prop:
+        return ''
+    if tag == 6:
+        return _link_text(prop)
+    if tag == 17:
+        return _link_only(prop)
+    if tag == 47:
+        group = _group_name(prop)
+        return f'@{group}' if group else ''
+    if tag == 7:
+        content = _content(prop, 'BoldProperty')
+        return f'**{content}**' if content else ''
+    if tag == 8:
+        content = _content(prop, 'ItalicProperty')
+        return f'*{content}*' if content else ''
+    class_name = _CONTENT_CLASSES.get(tag)
+    if class_name:
+        return _content(prop, class_name)
+    return TAG_PLACEHOLDERS.get(tag, '')
+
+
+def _content(prop: bytes, class_name: str) -> str:
+    """从元素属性里取文本内容。"""
+    cls = getattr(_elements().entities.RichTextElement, class_name, None)
+    if cls is None:
+        return ''
+    obj = cls()
+    try:
+        obj.ParseFromString(prop)
+    except Exception:
+        return ''
+    return getattr(obj, 'content', '') or ''
+
+
+def _group_name(prop: bytes) -> str:
+    """@群：取默认群名。"""
+    cls = getattr(_elements().entities.RichTextElement, 'AtUserGroupProperty', None)
+    if cls is None:
+        return ''
+    obj = cls()
+    try:
+        obj.ParseFromString(prop)
+    except Exception:
+        return ''
+    return obj.defaultGroupName or obj.i18nGroupName or ''
+
+
+def _link_text(prop: bytes) -> str:
+    """链接：显示文字和地址都有就渲染成 [文字](地址)，相同则只给地址。"""
+    anchor = _elements().entities.RichTextElement.AnchorProperty()
     try:
         anchor.ParseFromString(prop)
     except Exception:
         return '[链接]'
     href, label = anchor.href, anchor.content
     if href and label and label != href:
-        return f'{label}({href})'
+        return f'[{label}]({href})'
     return href or label or '[链接]'
+
+
+def _link_only(prop: bytes) -> str:
+    """卡片里的链接只有地址。"""
+    link = _elements().entities.RichTextElement.LinkProperty()
+    try:
+        link.ParseFromString(prop)
+    except Exception:
+        return '[链接]'
+    return f"[链接]({link.url})" if link.url else '[链接]'
+
+
+def _elements():
+    """富文本元素类型在完整 proto 里，延迟导入避免启动时加载大文件。"""
+    global _LARK_ALL
+    if _LARK_ALL is None:
+        from . import lark_all_pb2
+        _LARK_ALL = lark_all_pb2
+    return _LARK_ALL
 
 
 def decode_message_content(message_type, content_bytes):
