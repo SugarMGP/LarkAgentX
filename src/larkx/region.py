@@ -60,6 +60,16 @@ class Region:
     def file_host(self) -> str:
         return f'https://internal-api-lark-file.{self.domain}'
 
+    @property
+    def internal_api_host(self) -> str:
+        """云空间(explorer)接口主机：internal-api.<domain>，与 IM 网关不是一个域名。"""
+        return f'https://internal-api.{self.domain}'
+
+    @property
+    def space_api_host(self) -> str:
+        """文档/空间服务主机：internal-api-space.<domain>。"""
+        return f'https://internal-api-space.{self.domain}'
+
 
 REGIONS = {
     'feishu': Region(name='feishu', label='飞书', domain='feishu.cn', web_app_id='161471', locale='zh_CN'),

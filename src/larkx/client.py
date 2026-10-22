@@ -193,6 +193,15 @@ class LarkClient:
             raise SendUnconfirmed('服务端已接受发送请求，但响应里没有消息 id', packet_cid)
         return msg_id
 
+    def document_by_url(self, url: str) -> dict:
+        """按文档 URL 解析出文档信息（含 token）；wiki 链接也支持。"""
+        resp = self.api('docs.PullDocByURLsRequest', {'urls': [str(url)]})
+        docs = (resp or {}).get('docs') or {}
+        info = docs.get(str(url))
+        if not info:
+            raise ValueError(f'无法解析文档 URL: {url}')
+        return info
+
     def search(self, query: str):
         pkt = builders.build_search_packet(query, generate_long_request_id(), self.auth.region.locale)
         return builders.decode_search_response(self._gateway_post(pkt))
