@@ -97,8 +97,53 @@ IM 网关：
 - `GET /space/api/explorer/root/` → 返回 `{"code":0,"data":{}}`，空的，拿不到根目录 token（要从 children/list 里找）。
 - `GET /space/api/explorer/root/get/`、`/explorer/v2/root_folder/meta/` → 不是 404 页面就是 HTML，没有这个接口。
 - `chats.PullChatChattersByIDsRequest` 只按 `chatterIds` 批量，`chatId` 传 0 就行，不用给真实会话。
-- **没有"改已有文档正文"的 HTTP 接口**：文档编辑走编辑器的 box-stream 私有同步协议（WebSocket + OT 操作），`space.py` 里还没封装。导入只能**新建**文档，不能覆盖已有文档。要改文档正文用 `lark-cli docs +update`（开放平台身份），不要在库里另造一套。
+- **改已有文档正文不用 WebSocket**：编辑器的实时协作通道（box-stream）只在浏览器里用，保存走 HTTP `POST https://poizon.feishu.cn/space/api/docx/blocks/user_change`（见下）。导入只能**新建**文档，不能覆盖已有文档。
+- 要按 lark-cli 的形式改文档（块锚定的增删改），用 `lark-cli docs +update`（开放平台身份）不要自己造；但我们是真账号，只能走上面的 user_change 自己改。
 - `users.BatchPullUserProfileRequest` 和 `users.SearchUsersByContactPointRequest` 一样只回空包；`users.PullUserProfileRequest`（单个）和 `calendarevents.SearchUserByEmailCalendarRequest`（按邮箱索引）能用。
+
+## 改文档正文：已跑通的 user_change 协议
+
+编辑器保存正文走一个 HTTP 接口（**不需要 WebSocket**），已用真实账号验证能改、能删、能整段替换。
+
+```text
+POST https://poizon.feishu.cn/space/api/docx/blocks/user_change
+头：X-CSRFToken(=_csrf_token cookie)、Content-Type: application/json;charset=UTF-8、Referer: <docx url>
+体：{"member_id":"10000000000000", "uuid":<uuid4>, "page_id":<文档 token>,
+     "change_map":{"<块 id>":{"id":<块 id>, "version":<块当前版本>,
+       "payload":{"ops":[{"p":["text"],"subType":{"t":"easysync","o":{
+          "zone_changesets":{"0":"<changeset>"},
+          "apool":{"numToAttrib":{"0":["author","<我的 user id>"]},"nextNum":1,
+                    "attribToNum":{"author,<我的 user id>":0}}}}]}}}}
+```
+
+changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19）：
+
+```text
+<itemType><zoneId>:<oldLen><长度差><ops>[#<charBank 长度>]$<插入的文字>
+```
+
+- `itemType`：`Z`=正文块（`R`/`C` 是别的类型）
+- `zoneId`：默认 `"0"`，为 0 时省略
+- `oldLen`：块当前正文长度
+- `长度差`：变长写 `>N`、变短写 `<N`（N 是新旧长度差）
+- `ops`：Etherpad 风格操作串，`=N` 保留 N 字、`-N` 删 N 字、`*N` 设样式 N
+- `$` 后面是本次插入的文字
+
+例子（块原文 20 个字符）：
+
+| 动作 | changeset | 结果 |
+|---|---|---|
+| 末尾追加 ABC | `Z:k>3=k*0+3$ABC` | 原文+ABC |
+| 删掉最后一个字 | `Z:k<1=j-1$` | 少最后一个字 |
+| 整段替换 | `Z:k<j=0-k*0+j$新文字` | 只剩新文字 |
+
+坑：
+
+- 插入的正文要带样式：`*0+N`（0 号样式=author，N=插入字数）；**删掉的字不要带样式**（`*0-1` 会被服务端拒）。
+- `member_id` 用常量 `10000000000000` 即可，随机 14 位数字也能过网关，但计算阶段会失败。
+- `version` 用块的当前版本（`client_vars` 里每个块都有 `version`），版本不对会被拒。
+- 块的正文结构：`data.text.initialAttributedTexts = {"attribs": {"0": "*0+23"}, "text": {"0": "正文"}}`。
+- 服务端失败时返回 `{"code":4000028,"msg":"algorithm process fail"}`，多半是 changeset 语法或 version 不对。
 
 ## 不要留没人用的封装
 

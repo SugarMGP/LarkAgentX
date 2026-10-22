@@ -59,6 +59,14 @@ def _dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
+def _b36(number: int) -> str:
+    """base36 小写：飞书 changeset 里数字的编码方式。"""
+    digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+    if number < 36:
+        return digits[number]
+    return _b36(number // 36) + digits[number % 36]
+
+
 def _make_node(text: str, attr_nums: list[int], num_to_attrib: dict) -> dict:
     """把一组属性号应用到一段文本，得到带样式/链接的节点。"""
     node = {"text": text}
@@ -485,6 +493,38 @@ class SpaceClient:
         block_map = data.get('block_map') or {}
         sequence = [str(x) for x in (data.get('block_sequence') or [])]
         return _blocks_to_markdown(block_map, sequence)
+
+    # ---------- 编辑正文 ----------
+
+    def update_block_text(self, token: str, block_id: str, text: str) -> dict:
+        """整段替换一个正文块的内容，返回服务端的响应。
+
+        协议：先读块拿到当前正文和版本，再造 changeset 调
+        POST /space/api/docx/blocks/user_change。changeset 形如
+        ``Z:<旧长度><新长度>=0-<旧长度>*0+<新长度>$<新正文>``。
+        """
+        block = self.document_blocks(token).get('block_map', {}).get(block_id)
+        if block is None:
+            raise SpaceError(f'文档里没有这个块: {block_id}')
+        data = block.get('data') or {}
+        body = ((data.get('text') or {}).get('initialAttributedTexts') or {}).get('text') or {}
+        old = next(iter(body.values()), '') or ''
+        version = int(block.get('version') or 1)
+        author = self.auth.user_id
+        delta = len(text) - len(old)
+        diff = f">{_b36(delta)}" if delta >= 0 else f"<{_b36(-delta)}"
+        changeset = (f"Z:{_b36(len(old))}{diff}=0-{_b36(len(old))}"
+                     f"*0+{_b36(len(text))}${text}")
+        op = {"p": ["text"], "subType": {"t": "easysync", "o": {
+            "zone_changesets": {"0": changeset},
+            "apool": {"numToAttrib": {"0": ["author", author]}, "nextNum": 1,
+                      "attribToNum": {f"author,{author}": 0}}}}}
+        return self._post('/space/api/docx/blocks/user_change',
+                          json_body={"member_id": "10000000000000", "uuid": str(uuid.uuid4()),
+                                     "page_id": token,
+                                     "change_map": {block_id: {"id": block_id, "version": version,
+                                                             "payload": {"ops": [op]}}}},
+                          headers=self._csrf_headers())
 
     # ---------- 协作权限 ----------
 

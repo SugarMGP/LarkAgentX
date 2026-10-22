@@ -23,6 +23,7 @@ class FakeResponse:
 def auth_stub():
     return SimpleNamespace(
         cookies={"session": "x"},
+        user_id="7690398870819343329",
         gateway_app_id="161471",
         region=SimpleNamespace(domain="feishu.cn", internal_api_host="https://internal-api.feishu.cn",
                                space_api_host="https://internal-api-space.feishu.cn"),
@@ -272,3 +273,30 @@ def test_pipe_op_replaces_the_style_set():
     nodes = _decode_line("abcdef", "*0+3|1+2", {"0": ["bold", "true"], "1": ["italic", "true"]})
     assert [(n["text"], n.get("bold"), n.get("italic")) for n in nodes] == [
         ("abc", True, None), ("de", None, True), ("f", None, None)]
+
+
+def test_update_block_text_replaces_the_body(monkeypatch):
+    blocks = {"code": 0, "data": {"block_map": {"b1": {
+        "id": "b1", "version": 3,
+        "data": {"type": "text", "text": {"initialAttributedTexts": {"text": {"0": "old"}}}}}}}}
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse(blocks)
+
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs.get("json"), kwargs.get("headers")))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).update_block_text("doc1", "b1", "new text")
+
+    url, body, headers = posts[0]
+    assert url.endswith("/space/api/docx/blocks/user_change")
+    assert body["page_id"] == "doc1"
+    change = body["change_map"]["b1"]
+    assert change["version"] == 3
+    # 旧正文 3 个字换成 8 个字：长度差 +5，删掉旧的 3 个，插入新的 8 个。
+    assert change["payload"]["ops"][0]["subType"]["o"]["zone_changesets"]["0"] == "Z:3>5=0-3*0+8$new text"
+    assert "X-CSRFToken" in headers
