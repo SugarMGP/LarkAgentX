@@ -3,6 +3,7 @@ import re
 from urllib.parse import urlsplit
 
 import requests
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from loguru import logger
 from .auth import LarkAuth
 from .config import load_config
@@ -77,3 +78,73 @@ def download(auth: LarkAuth, url: str, out_path: str=None, max_bytes: int=200 * 
                 if n > max_bytes:
                     raise ValueError('文件过大')
         return (out_path, content_type, n)
+
+
+def image_resources(content: dict) -> list[dict]:
+    """从消息内容里取图片资源。
+
+    content 是 decode_message_content 解出来的结构。新版图片在 imageV2 里：
+    key 是图片 key（img_v3_…），crypto 是解密用的 {key, iv, aad}（没有就是明文图片），
+    thumbnail 是消息里内联的缩略图字节（webp）。
+    """
+    out = []
+    image = (content or {}).get("image") or {}
+    v2 = (content or {}).get("imageV2") or {}
+    if v2.get("imageKey"):
+        cipher = ((v2.get("crypto") or {}).get("cipher")) or {}
+        width = height = 0
+        for variant in v2.get("variants") or []:
+            size = variant.get("size") or {}
+            width, height = int(size.get("width") or 0), int(size.get("height") or 0)
+            break
+        out.append({
+            "key": str(v2.get("imageKey") or ""),
+            "width": width,
+            "height": height,
+            "crypto": ({
+                "key": cipher.get("key") or b"",
+                "iv": cipher.get("iv") or b"",
+                "aad": cipher.get("extra") or b"",
+            } if cipher.get("key") else None),
+            "thumbnail": v2.get("thumbnailInline") or b"",
+        })
+    elif image.get("imageKey") or image.get("key"):
+        origin = image.get("origin") or {}
+        out.append({
+            "key": str(image.get("imageKey") or image.get("key") or ""),
+            "width": int(origin.get("width") or 0),
+            "height": int(origin.get("height") or 0),
+            "crypto": None,
+            "thumbnail": b"",
+        })
+    return out
+
+
+def open_image(auth: LarkAuth, image_key: str):
+    """打开图片的上游响应。字节是加密的（有 crypto 时要自己解密）。"""
+    resp = requests.get(f'{auth.region.file_host}/static-resource/image/{image_key}',
+                        cookies=auth.cookies, headers=_upload_headers(auth), stream=True, timeout=60)
+    resp.raise_for_status()
+    return resp
+
+
+def decrypt_image(blob: bytes, crypto: dict) -> bytes:
+    """用消息里的 crypto 解密图片字节（AES-256-GCM）。"""
+    if not crypto:
+        return blob
+    return AESGCM(crypto["key"]).decrypt(crypto["iv"], blob, crypto.get("aad") or b"")
+
+
+def sniff_image_type(blob: bytes) -> str:
+    """看字节头猜图片类型。"""
+    if blob.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if blob.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if blob.startswith(b'GIF8'):
+        return 'image/gif'
+    if blob[:4] == b'RIFF' and blob[8:12] == b'WEBP':
+        return 'image/webp'
+    if blob.startswith(b'BM'):
+        return 'image/bmp'
+    return 'application/octet-stream'

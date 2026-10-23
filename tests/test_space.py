@@ -670,3 +670,40 @@ def test_insert_block_refuses_two_anchors(monkeypatch):
                             "block_map": _doc_with_children(["p1"]), "block_sequence": ["p1"]}}))
     with pytest.raises(SpaceError, match="只能给一个"):
         SpaceClient(auth_stub()).insert_block("doc1", "x", after="p1", parent_id="p1")
+
+
+def test_image_resources_extracts_key_size_and_crypto():
+    from larkx.media import image_resources
+    content = {"imageV2": {
+        "imageKey": "img_v3_abc", "fsUnit": "eu_nc-cdn",
+        "crypto": {"type": 1, "cipher": {"key": b"k" * 32, "iv": b"i" * 12, "extra": b""}},
+        "variants": [{"type": 1, "size": {"width": 200, "height": 100}}],
+        "thumbnailInline": b"RIFF....WEBP",
+    }}
+    resources = image_resources(content)
+    assert len(resources) == 1
+    assert resources[0]["key"] == "img_v3_abc"
+    assert (resources[0]["width"], resources[0]["height"]) == (200, 100)
+    assert resources[0]["crypto"]["key"] == b"k" * 32
+    assert resources[0]["thumbnail"].startswith(b"RIFF")
+
+
+def test_image_resources_handles_plain_and_old_format():
+    from larkx.media import image_resources
+    assert image_resources({}) == []
+    assert image_resources({"imageV2": {"imageKey": ""}}) == []
+    old = image_resources({"image": {"imageKey": "img_v2_x", "origin": {"width": 10, "height": 5}}})
+    assert old[0]["key"] == "img_v2_x" and old[0]["crypto"] is None
+
+
+def test_decrypt_image_returns_plain_bytes():
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from larkx.media import decrypt_image, sniff_image_type
+    key, iv = b"k" * 32, b"i" * 12
+    plain = b"\x89PNG\r\n\x1a\nhello"
+    blob = AESGCM(key).encrypt(iv, plain, b"")
+    assert decrypt_image(blob, {"key": key, "iv": iv, "aad": b""}) == plain
+    assert decrypt_image(plain, None) == plain
+    assert sniff_image_type(plain) == "image/png"
+    assert sniff_image_type(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "image/webp"
+    assert sniff_image_type(b"xx") == "application/octet-stream"

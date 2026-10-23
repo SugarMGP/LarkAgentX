@@ -11,6 +11,7 @@ dependencies = [
     "websockets>=15.0.1",
     "protobuf>=5.29.3,<6",
     "protobuf3-to-dict>=0.1.5",
+    "cryptography>=50.0.2",
 ]
 
 [build-system]
