@@ -388,3 +388,92 @@ def test_set_block_type_swaps_the_type_field(monkeypatch):
     change = posts[0]["change_map"]["b1"]
     assert change["version"] == 7
     assert change["payload"]["ops"] == [{"p": ["type"], "action": {"od": "text", "oi": "bullet"}}]
+
+
+def test_document_meta_and_members_use_the_document_token(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        if 'wiki' in url:
+            return FakeResponse({"code": 0, "data": {"node": {"obj_token": "T1", "space_id": "S1"}}})
+        if 'meta' in url:
+            return FakeResponse({"code": 0, "data": {"title": "周报", "owner_id": "u1"}})
+        return FakeResponse({"code": 0, "data": {"members": [{"owner_id": "u1", "is_owner": True}]}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    space = SpaceClient(auth_stub())
+    assert space.document_meta("https://x.feishu.cn/wiki/W1")["title"] == "周报"
+    assert space.document_members("https://x.feishu.cn/wiki/W1")["members"][0]["owner_id"] == "u1"
+    # wiki 链接先换成真实文档 token，这些接口只认文档 token
+    assert [p for url, p in calls if 'meta' in url] == [{"token": "T1", "type": 22}]
+    assert [p for url, p in calls if 'members' in url] == [{"token": "T1", "type": 22}]
+
+
+def test_remove_member_posts_owner_and_type(monkeypatch):
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {}})
+
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs.get("data"), kwargs.get("headers")))
+        return FakeResponse({"code": 0, "data": {"ret": True}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).remove_member("doc1", "g1", owner_type=2)
+
+    url, data, headers = posts[0]
+    assert url.endswith("/space/api/suite/permission/members/delete/")
+    assert data == {"token": "doc1", "type": "22", "owner_id": "g1", "owner_type": "2"}
+    assert "X-CSRFToken" in headers
+
+
+def test_update_title_posts_the_new_title(monkeypatch):
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {}})
+
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs.get("json")))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).update_title("doc1", "新标题")
+
+    url, body = posts[0]
+    assert url.endswith("/space/api/doc.v2/update_title")
+    assert body == {"token": "doc1", "obj_type": 22, "title": "新标题"}
+
+
+def test_add_member_supports_groups(monkeypatch):
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {}})
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("data"))
+        return FakeResponse({"code": 0, "data": {"success_count": 1}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).add_member("doc1", ["g1"], owner_type=2)
+
+    assert '"owner_type":2' in posts[0]["owners"]
+
+
+def test_document_token_resolves_wiki_nodes(monkeypatch):
+    def fake_get(url, **kwargs):
+        if 'wiki' in url:
+            return FakeResponse({"code": 0, "data": {"node": {"obj_token": "T1", "space_id": "S1"}}})
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    space = SpaceClient(auth_stub())
+    assert space.document_token("https://x.feishu.cn/wiki/W1") == "T1"
+    assert space.document_token("W1") == "T1"
+    assert space.document_token("doxcn1") == "doxcn1"

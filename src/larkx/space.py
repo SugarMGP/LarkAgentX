@@ -43,6 +43,8 @@ _HEADINGS = {"heading1": 1, "heading2": 2, "heading3": 3, "heading4": 4, "headin
 BLOCK_TYPES = frozenset({"text", "bullet", "ordered", "todo", "quote", "code", "divider"}
                         | {f"heading{level}" for level in range(1, 10)})
 _BLOCK_ID_ALPHABET = string.ascii_letters + string.digits
+# 云文档对象在空间接口里的 obj_type
+OBJ_TYPE_DOC = 22
 # 协作者权限位（飞书位掩码）：可阅读 1、可评论 2、可编辑 4
 PERM_READABLE = 1
 PERM_COMMENTABLE = 2
@@ -508,6 +510,14 @@ class SpaceClient:
             space_id = node['space_id']
         elif url_or_token.startswith('http'):
             token = url_or_token.rstrip('/').rsplit('/', 1)[-1]
+        elif not token.startswith('doxcn'):
+            # 可能是知识库节点 token：节点里的文档要用真实文档 token 查正文和权限。
+            try:
+                node = self.wiki_node(token)
+            except SpaceError:
+                node = {}
+            if node.get('obj_token'):
+                token, space_id, wiki_token = node['obj_token'], node.get('space_id', ''), token
         return token, space_id, wiki_token
 
     def document_markdown(self, url_or_token: str) -> str:
@@ -686,6 +696,51 @@ class SpaceClient:
                                      "page_id": token, "change_map": change_map},
                           headers=self._csrf_headers())
 
+    # ---------- 文档元数据与权限 ----------
+
+    def document_token(self, url_or_token: str) -> str:
+        """真实文档 token：wiki 链接或知识库节点 token 会被换成文档 token（权限接口只认它）。"""
+        return self._doc_token(url_or_token)[0]
+
+    def document_meta(self, url_or_token: str) -> dict:
+        """文档元数据：标题、所有者、创建/最后修改人、时间、密级等。
+
+        wiki 链接会自动换成真实文档 token（这些接口只认文档 token）。
+        """
+        token, _, _ = self._doc_token(url_or_token)
+        return self._get('/space/api/meta/', token=token, type=OBJ_TYPE_DOC)
+
+    def document_path(self, url_or_token: str) -> dict:
+        """文档所在位置：云空间/知识库的层级路径，nodes 里是各级节点。"""
+        token, _, _ = self._doc_token(url_or_token)
+        return self._get('/space/api/explorer/v2/obj/path/', obj_token=token, obj_type=OBJ_TYPE_DOC)
+
+    def document_members(self, url_or_token: str) -> dict:
+        """文档的协作者（可访问人）列表：members 是人，entities.users 是他们的资料。"""
+        token, _, _ = self._doc_token(url_or_token)
+        return self._get('/space/api/suite/permission/members.v2/', token=token, type=OBJ_TYPE_DOC)
+
+    def document_permission(self, url_or_token: str) -> dict:
+        """文档的链接分享设置：谁拿到链接能看、能编辑、密级联动等。"""
+        token, _, _ = self._doc_token(url_or_token)
+        return self._get('/space/api/suite/permission/public.v4/', token=token, type=OBJ_TYPE_DOC)
+
+    def remove_member(self, token: str, owner_id: str, owner_type: int = 1,
+                      obj_type: int = OBJ_TYPE_DOC) -> dict:
+        """把协作者从文档上移除。owner_id 是飞书数字 id，owner_type：1=用户、2=群组。"""
+        return self._post('/space/api/suite/permission/members/delete/',
+                           data={'token': token, 'type': str(obj_type),
+                                 'owner_id': str(owner_id), 'owner_type': str(owner_type)},
+                           content_type='application/x-www-form-urlencoded',
+                           headers=self._csrf_headers())
+
+    def update_title(self, url_or_token: str, title: str) -> dict:
+        """改文档标题。"""
+        token, _, _ = self._doc_token(url_or_token)
+        return self._post('/space/api/doc.v2/update_title',
+                          json_body={'token': token, 'obj_type': OBJ_TYPE_DOC, 'title': title},
+                          headers=self._csrf_headers())
+
     # ---------- 协作权限 ----------
 
     def search_user(self, query: str) -> list[dict]:
@@ -695,13 +750,14 @@ class SpaceClient:
         return list(data.get('candidates') or [])
 
     def add_member(self, token: str, user_ids: list[str], permission: int = PERM_EDITABLE,
-                   obj_type: int = 22) -> dict:
-        """给文档加协作者：user_ids 是飞书数字 user id，permission 是权限位掩码。
+                   obj_type: int = OBJ_TYPE_DOC, owner_type: int = 1) -> dict:
+        """给文档加协作者：user_ids 是飞书数字 id，permission 是权限位掩码。
 
-        只有文档所有者能加协作者。这里 notify_lark=0 表示不通知对方，
-        链接由调用方自己发出去。
+        owner_type：1=用户、2=群组。只有文档所有者能加协作者。这里 notify_lark=0
+        表示不通知对方，链接由调用方自己发出去。
         """
-        owners = [{'owner_id': user_id, 'owner_type': 1, 'permission': permission} for user_id in user_ids]
+        owners = [{'owner_id': user_id, 'owner_type': owner_type, 'permission': permission}
+                  for user_id in user_ids]
         result = self._post('/space/api/suite/permission/members/create/',
                              data={'token': token, 'type': str(obj_type), 'owners': _dumps(owners),
                                    'notify_lark': '0', 'send_lark_im': 'false', 'lark_im_text': ''},

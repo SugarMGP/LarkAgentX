@@ -71,9 +71,24 @@ IM 网关：
 | `POST /space/api/import/create` + `GET import/result/{ticket}` | 把上传的文件转成云文档；`point.mount_type` 1=云空间文件夹、2=wiki 节点 |
 | `GET /space/api/search/permission_candidates/?query=` | 云空间搜人/搜群，返回 `owner_id`/`owner_name`/`owner_type` |
 | `POST /space/api/suite/permission/members/create/` | **给文档加协作者** |
-| `GET /space/api/suite/permission/members/?token=&type=22` | 读文档的协作者列表 |
+| `GET /space/api/suite/permission/members.v2/?token=&type=22` | 读文档的协作者（可访问人）列表，members + entities.users |
+| `GET /space/api/suite/permission/public.v4/?token=&type=22` | 读文档的链接分享/可见范围设置（perm_public） |
+| `GET /space/api/meta/?token=&type=22` | 文档元数据：标题、所有者、创建/最后修改人、创建/修改时间、密级 |
+| `GET /space/api/explorer/v2/obj/path/?obj_token=&obj_type=22` | 文档所在位置（云空间层级；wiki 里的文档返回空） |
+| `POST /space/api/doc.v2/update_title` | 改标题，`{"token":..,"obj_type":22,"title":".."}` |
+| `POST /space/api/suite/permission/members/delete/` | 移除协作者，表单 `token/type/owner_id/owner_type`（单个，不是数组） |
+| `POST /space/api/suite/permission/check_lock/public/update/` | 改可见范围前的校验，`{"token":..,"type":22,"link_share_entity_v2":N}` → `{"need_lock":bool}` |
 | `POST /space/api/suite/permission/members/delete/` | 移除协作者 |
 | `POST /space/api/explorer/obj/delete/` | 删文档（参数 `obj_token` + `obj_type`） |
+
+文档权限的细节（真账号验证过）：
+
+- 协作者是**用户（owner_type=1）或群组（owner_type=2）**；加协作者表单里的 `permission` 是 1=可读、4=可编辑。
+- 读回来的 `members[].permissions` 是另一个位掩码：1=可读、含 4=可编辑、所有者是 1039。判断能不能编辑看 `permissions & 4`。
+- 权限/元数据接口只认**真实文档 token**（`doxcn...`），wiki 链接要先换成它；`space.document_token(url_or_token)` 做这件事。
+- 链接可见范围：前端下拉只有"仅协作者可访问"和"组织内获得链接的人可阅读"两项，对应 `link_share_entity(_v2)` 1 和 2；开启链接分享会同时把文档密级降级，需要在"调整设置"弹窗里确认。
+- **没逆出来的**：真正写链接可见范围的接口（`suite/permission/public/update/` 存在但参数不对，网页端那步的请求没抓到），所以 LarkX 只读不写可见范围。
+- 协作者候选人在网页端是走 IM 网关搜的（`SEARCH_DOC_WEB`），`space.search_user()` 走的是云空间的 `search/permission_candidates/`，两个都能搜到人。
 
 加协作者的细节（`SpaceClient.add_member`）：
 
