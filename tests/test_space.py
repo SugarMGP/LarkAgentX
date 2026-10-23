@@ -392,32 +392,39 @@ def test_set_block_type_swaps_the_type_field(monkeypatch):
     assert change["payload"]["ops"] == [{"p": ["type"], "action": {"od": "text", "oi": "bullet"}}]
 
 
-def test_document_meta_and_members_use_the_document_token(monkeypatch):
+def test_document_info_uses_the_document_token(monkeypatch):
     calls = []
 
     def fake_get(url, **kwargs):
         calls.append((url, kwargs.get("params")))
         if 'wiki' in url:
-            return FakeResponse({"code": 0, "data": {"node": {"obj_token": "T1", "space_id": "S1"}}})
+            return FakeResponse({"code": 0, "data": {"obj_token": "T1", "space_id": "S1",
+                                                   "title": "周报", "wiki_token": "W1",
+                                                   "parent_wiki_token": "", "url": "https://x/wiki/W1",
+                                                   "detail_info": {"editor_id": "u2"}}})
         if 'meta' in url:
             return FakeResponse({"code": 0, "data": {"title": "周报", "owner_id": "u1",
                                                    "owner_user_name": "张三", "obj_token": "T1",
-                                                   "obj_type": "docx", "create_time": 10, "edit_time": 20}})
-        return FakeResponse({"code": 0, "data": {"total_num": 1, "members": [
-            {"owner_id": "u1", "owner_name": "张三", "is_owner": True, "permissions": 1039,
-             "owner_type": 0}]}})
+                                                   "obj_type": "docx", "create_time": 10, "edit_time": 20,
+                                                   "edit_user_name": "李四"}})
+        if 'members' in url:
+            return FakeResponse({"code": 0, "data": {"total_num": 1, "members": [
+                {"owner_id": "u1", "owner_name": "张三", "is_owner": True, "permissions": 1039,
+                 "owner_type": 0}]}})
+        return FakeResponse({"code": 0, "data": {}})
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     space = SpaceClient(auth_stub())
-    meta = space.document_meta("https://x.feishu.cn/wiki/W1")
+    info = space.document_info("https://x.feishu.cn/wiki/W1")
     # 整理过的字段，不透传上游的 owner_user_name 这类名字。
-    assert meta["title"] == "周报" and meta["token"] == "T1" and meta["type"] == "docx"
-    assert meta["owner"] == {"id": "u1", "name": "张三"}
-    assert meta["create_time"] == 10 and meta["update_time"] == 20
-    members = space.document_members("https://x.feishu.cn/wiki/W1")
-    assert members["total"] == 1
-    assert members["members"] == [{"id": "u1", "name": "张三", "kind": "user",
-                                   "is_owner": True, "permission": "edit"}]
+    assert info["title"] == "周报" and info["token"] == "T1" and info["type"] == "docx"
+    assert info["owner"] == {"id": "u1", "name": "张三"}
+    assert info["last_editor"] == {"id": "u2", "name": "李四"}
+    assert info["create_time"] == 10 and info["update_time"] == 20
+    assert info["path"] == ["周报"] and info["url"] == "https://x/wiki/W1"
+    assert info["total"] == 1
+    assert info["members"] == [{"id": "u1", "name": "张三", "kind": "user",
+                                "is_owner": True, "permission": "edit"}]
     # wiki 链接先换成真实文档 token，这些接口只认文档 token
     assert [p for url, p in calls if 'meta' in url] == [{"token": "T1", "type": 22}]
     assert [p for url, p in calls if 'members' in url] == [{"token": "T1", "type": 22}]
@@ -497,7 +504,8 @@ def test_document_token_resolves_wiki_nodes(monkeypatch):
     # 不是知识库节点的 token 原样返回，而且同一个 token 只问一次。
     assert space.document_token("T2") == "T2"
     assert space.document_token("T2") == "T2"
-    assert asked == ["W1", "W1", "T2"]
+    # 节点信息有缓存，W1 只问了一次。
+    assert asked == ["W1", "T2"]
 
 
 def _doc_with_children(children):
@@ -639,3 +647,18 @@ def test_unknown_block_raises(monkeypatch):
         space.set_block_type("doc1", "nope", "bullet")
     with pytest.raises(SpaceError, match="文档里没有这个块"):
         space.delete_block("doc1", "nope")
+
+
+def test_wiki_path_walks_up_the_parent_nodes(monkeypatch):
+    nodes = {
+        "W3": {"title": "周报", "parent_wiki_token": "W2", "url": "https://x/wiki/W3"},
+        "W2": {"title": "项目", "parent_wiki_token": "W1", "url": "https://x/wiki/W2"},
+        "W1": {"title": "知识库", "parent_wiki_token": "", "url": "https://x/wiki/W1"},
+    }
+
+    def fake_get(url, **kwargs):
+        token = kwargs.get("params", {}).get("wiki_token")
+        return FakeResponse({"code": 0, "data": nodes.get(token, {})})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    assert SpaceClient(auth_stub()).wiki_path("W3") == ["知识库", "项目", "周报"]

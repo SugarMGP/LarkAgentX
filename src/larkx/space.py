@@ -256,7 +256,7 @@ def _blocks_to_markdown(block_map: dict, sequence: list[str]) -> str:
     def children(bid: str) -> list[str]:
         return list(((block_map.get(bid) or {}).get("data") or {}).get("children") or [])
 
-    def render(bid: str) -> list[str]:
+    def render(bid: str, depth: int = 0) -> list[str]:
         block = block_map.get(bid) or {}
         data = block.get("data") or {}
         btype = data.get("type") or "text"
@@ -269,10 +269,12 @@ def _blocks_to_markdown(block_map: dict, sequence: list[str]) -> str:
             language = data.get("language") or ""
             return [f"```{language}\n{_block_text(block)}\n```"] + render_children(children(bid))
         if btype in _LISTS:
+            # 列表项按层级缩进，子项缩进两格，markdown 才认得出是嵌套的。
             marker = {"bullet": "- ", "ordered": "1. ", "todo": "- [ ] "}[btype]
-            lines = [marker + _block_text(block)] if _block_text(block) else []
+            pad = "  " * depth
+            lines = [pad + marker + _block_text(block)] if _block_text(block) else []
             for child in children(bid):
-                lines.extend(render(child))
+                lines.extend(render(child, depth + 1))
             return ["\n".join(lines)] if lines else []
         if btype == "quote":
             lines = ["\n".join("> " + line for line in _block_text(block).split("\n"))]
@@ -353,6 +355,8 @@ class SpaceClient:
         self._csrf = ''
         # 裸 token 的解析结果：知识库节点 token 要换成文档 token，查过一次就不用再查。
         self._resolved: dict[str, tuple[str, str, str]] = {}
+        # 知识库节点信息，按 wiki token 缓存。
+        self._wiki_nodes: dict[str, dict] = {}
 
     def _get(self, path: str, host: str = '', **params) -> dict:
         url = f'{host or self.auth.region.internal_api_host}{path}'
@@ -491,13 +495,42 @@ class SpaceClient:
     # ---------- 云文档 ----------
 
     def wiki_node(self, wiki_token: str) -> dict:
-        """wiki 节点信息：真实文档 token、空间 id、标题、文档类型。"""
+        """知识库节点信息：真实文档 token、空间 id、标题、文档类型、父节点、负责人等。"""
+        if wiki_token in self._wiki_nodes:
+            return self._wiki_nodes[wiki_token]
         data = self._get('/space/api/wiki/v2/tree/get_node/', wiki_token=wiki_token)
         node = data.get('node') or data
-        return {'obj_token': node.get('obj_token') or wiki_token,
+        detail = node.get('detail_info') or {}
+        info = {'obj_token': node.get('obj_token') or wiki_token,
                 'space_id': node.get('space_id') or '',
                 'title': node.get('title') or '',
-                'obj_type': node.get('obj_type')}
+                'obj_type': node.get('obj_type'),
+                'wiki_token': node.get('wiki_token') or wiki_token,
+                'parent_wiki_token': node.get('parent_wiki_token') or '',
+                'url': node.get('url') or '',
+                'owner_id': str(detail.get('owner_id') or ''),
+                'creator_id': str(detail.get('creator_id') or ''),
+                'editor_id': str(detail.get('editor_id') or ''),
+                'create_time': int(detail.get('create_time') or 0),
+                'edit_time': int(detail.get('edit_time') or 0)}
+        self._wiki_nodes[wiki_token] = info
+        return info
+
+    def wiki_path(self, wiki_token: str) -> list[str]:
+        """知识库里这个文档的位置：从最上层节点到它自己的标题列表。"""
+        titles: list[str] = []
+        current = wiki_token
+        seen = set()
+        while current and current not in seen:
+            seen.add(current)
+            try:
+                node = self.wiki_node(current)
+            except SpaceError:
+                break
+            if node['title']:
+                titles.append(node['title'])
+            current = node['parent_wiki_token']
+        return list(reversed(titles))
 
     def document_blocks(self, obj_token: str, *, space_id: str = '', wiki_token: str = '') -> dict:
         """文档正文的所有块：{block_map, block_sequence}。"""
@@ -565,9 +598,10 @@ class SpaceClient:
     # ---------- 编辑正文 ----------
 
     def document_outline(self, url_or_token: str) -> dict:
-        """文档的章节结构：{token, title, sections:[{id, level, title, blocks:[{id, type, text}]}]}。
+        """文档的章节结构：{token, title, sections:[{id, level, title, blocks:[...]}]}。
 
         用来定位"要改哪一段"：每个标题带上它下面的正文块，块 id 可以直接传给 update_block_text。
+        每个块还带 children（嵌套的子块，比如列表的子项），和 markdown 里的层级一致。
         """
         token, _, _ = self._doc_token(url_or_token)
         data = self.document_blocks(token)
@@ -576,7 +610,22 @@ class SpaceClient:
         title = ''
         sections: list[dict] = []
         current: dict | None = None
-        for block_id in order:
+
+        def subtree(block_id: str) -> list[dict]:
+            kids = ((blocks.get(block_id) or {}).get('data') or {}).get('children') or []
+            out = []
+            for child in kids:
+                if child not in blocks:
+                    continue
+                meta = blocks[child].get('data') or {}
+                out.append({"id": child, "type": str(meta.get('type') or ''),
+                            "text": _block_text(blocks[child]), "children": subtree(child)})
+            return out
+
+        # 正文流是页面的顶层子块；嵌套的子块挂在各自的父块下，不在顶层再出现一次。
+        page = blocks.get(token) or {}
+        roots = [b for b in ((page.get('data') or {}).get('children') or []) if b in blocks]
+        for block_id in roots or order:
             meta = blocks[block_id].get('data') or {}
             kind = str(meta.get('type') or '')
             text = _block_text(blocks[block_id])
@@ -586,7 +635,8 @@ class SpaceClient:
                 current = {"id": block_id, "level": int(kind[7:] or 1), "title": text, "blocks": []}
                 sections.append(current)
             elif kind in _EDITABLE_BLOCKS and current is not None:
-                current["blocks"].append({"id": block_id, "type": kind, "text": text})
+                current["blocks"].append({"id": block_id, "type": kind, "text": text,
+                                         "children": subtree(block_id)})
         return {"token": token, "title": title, "sections": sections}
 
     def update_block_text(self, url_or_token: str, block_id: str, text: str, *, append: bool = False) -> dict:
@@ -763,42 +813,21 @@ class SpaceClient:
         """真实文档 token：wiki 链接或知识库节点 token 会被换成文档 token（权限接口只认它）。"""
         return self._doc_token(url_or_token)[0]
 
-    def document_meta(self, url_or_token: str) -> dict:
-        """文档元数据：标题、所有者、创建/最后修改人、创建/修改时间。
+    def document_info(self, url_or_token: str) -> dict:
+        """文档详情：标题、所有者、创建/最后修改人、时间、所在位置、可访问人。
 
-        字段是整理过的稳定名字，不透传飞书原始响应；wiki 链接会自动换成真实文档 token。
+        {token, title, type, url, owner{id,name}, creator{id,name}, last_editor{id,name},
+         create_time, update_time, path[], total, members[{id,name,kind,is_owner,permission}]}
+
+        字段是整理过的稳定名字，不透传飞书原始响应；知识库里的文档往上走节点树，
+        云空间里的文档走云空间路径。
         """
-        token, _, _ = self._doc_token(url_or_token)
-        data = self._get('/space/api/meta/', token=token, type=OBJ_TYPE_DOC)
-        return {
-            "token": str(data.get("obj_token") or token),
-            "title": str(data.get("title") or ""),
-            "type": str(data.get("obj_type") or ""),
-            "url": str(data.get("url") or ""),
-            "owner": {"id": str(data.get("owner_id") or ""), "name": str(data.get("owner_user_name") or "")},
-            "creator": {"id": str(data.get("create_uid") or ""), "name": str(data.get("create_user_name") or "")},
-            "last_editor": {"name": str(data.get("edit_user_name") or "")},
-            "create_time": int(data.get("create_time") or 0),
-            "update_time": int(data.get("edit_time") or 0),
-        }
-
-    def document_path(self, url_or_token: str) -> dict:
-        """文档所在位置：{"path": ["我的空间", "周报"]}，云空间里的层级；wiki 文档是空数组。"""
-        token, _, _ = self._doc_token(url_or_token)
-        data = self._get('/space/api/explorer/v2/obj/path/', obj_token=token, obj_type=OBJ_TYPE_DOC)
-        nodes = (data.get("entities") or {}).get("nodes") or {}
-        return {"path": [str((nodes.get(node_id) or {}).get("name") or "")
-                         for node_id in data.get("path") or []]}
-
-    def document_members(self, url_or_token: str) -> dict:
-        """文档的协作者（可访问人）：{"total": n, "members": [{id, name, kind, is_owner, permission}]}。
-
-        kind 是 user 或 group，permission 是 read 或 edit。
-        """
-        token, _, _ = self._doc_token(url_or_token)
-        data = self._get('/space/api/suite/permission/members.v2/', token=token, type=OBJ_TYPE_DOC)
+        token, space_id, wiki_token = self._doc_token(url_or_token)
+        meta = self._get('/space/api/meta/', token=token, type=OBJ_TYPE_DOC)
+        raw_members = self._get('/space/api/suite/permission/members.v2/', token=token, type=OBJ_TYPE_DOC)
+        path, url, editor_id = self._document_location(token, space_id, wiki_token, meta)
         members = []
-        for member in data.get("members") or []:
+        for member in raw_members.get("members") or []:
             members.append({
                 "id": str(member.get("owner_id") or ""),
                 "name": str(member.get("owner_name") or ""),
@@ -807,7 +836,35 @@ class SpaceClient:
                 # 飞书的权限位掩码：4 是可编辑，1 是可读。
                 "permission": "edit" if int(member.get("permissions") or 0) & 4 else "read",
             })
-        return {"total": int(data.get("total_num") or len(members)), "members": members}
+        return {
+            "token": str(meta.get("obj_token") or token),
+            "title": str(meta.get("title") or ""),
+            "type": str(meta.get("obj_type") or ""),
+            "url": url,
+            "owner": {"id": str(meta.get("owner_id") or ""), "name": str(meta.get("owner_user_name") or "")},
+            "creator": {"id": str(meta.get("create_uid") or ""), "name": str(meta.get("create_user_name") or "")},
+            "last_editor": {"id": editor_id, "name": str(meta.get("edit_user_name") or "")},
+            "create_time": int(meta.get("create_time") or 0),
+            "update_time": int(meta.get("edit_time") or 0),
+            "path": path,
+            "total": int(raw_members.get("total_num") or len(members)),
+            "members": members,
+        }
+
+    def _document_location(self, token: str, space_id: str, wiki_token: str, meta: dict) -> tuple:
+        """文档的位置（层级名列表）、分享链接、最后修改人 id。"""
+        if wiki_token:
+            node = self.wiki_node(wiki_token)
+            return self.wiki_path(wiki_token), node['url'], node['editor_id']
+        data = self._get('/space/api/explorer/v2/obj/path/', obj_token=token, obj_type=OBJ_TYPE_DOC)
+        nodes = (data.get("entities") or {}).get("nodes") or {}
+        path = [str((nodes.get(node_id) or {}).get("name") or "")
+                for node_id in data.get("path") or []]
+        editor_id = ''
+        for node in nodes.values():
+            if node.get('obj_token') == token:
+                editor_id = str(node.get('edit_uid') or '')
+        return path, str(meta.get('url') or ''), editor_id
 
     def remove_member(self, token: str, owner_id: str, owner_type: int = 1,
                       obj_type: int = OBJ_TYPE_DOC) -> dict:
