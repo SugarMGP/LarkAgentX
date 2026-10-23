@@ -95,17 +95,17 @@ IM 网关：
 
 | 方法 | 返回 |
 |---|---|
-| `document_meta` | `{token, title, type, url, owner{id,name}, creator{id,name}, last_editor{name}, create_time, update_time}` |
-| `document_path` | `{path: ["我的空间", "周报"]}`（wiki 里的文档是空数组） |
-| `document_members` | `{total, members: [{id, name, kind(user/group), is_owner, permission(read/edit)}]}` |
+| `document_info` | `{token, title, type, url, owner{id,name}, creator{id,name}, last_editor{id,name}, create_time, update_time, path[], total, members[{id,name,kind(user/group),is_owner,permission(read/edit)}]}`（wiki 文档的 path 走知识库节点树、url 给 wiki 链接；云空间文档走云空间路径、url 给 docx 链接） |
+| `wiki_node` / `wiki_path` | 知识库节点信息 / 节点在知识库里的层级（从最上层到它自己） |
 | `document_outline` | `{token, title, sections: [{id, level, title, blocks: [{id, type, text}]}]}` |
 | `update_block_text` / `set_block_type` / `delete_block` / `insert_block` | `{block_id, version, ...}`，version 是改完后的块版本号 |
+| `document_outline` | 章节结构，块里带 `children` 子块树（和 markdown 的层级一致） |
 | `delete_section` | `{blocks: [被删的块 id]}` |
 | `add_member` / `remove_member` / `update_title` | `{success_count, fail_owners}` / `{removed}` / `{token, title}` |
 
 要原始结构就用 `document_blocks`（块树本身就是协议结构）。
 
-块树有两层：**块在正文流里的顺序**（`block_sequence`，标题下的正文就是靠顺序排在标题后面，不是它的子块）和**父子层级**（`data.children`，只有列表子项、表格单元格这类才用得上）。`insert_block(parent_id=...)` 只能往第二层插；插进去的块不在 `block_sequence` 里，所以 `document_outline` 看不到它——**要让 agent 能写能读，读取侧必须先认层级**，否则写进去的块等于丢了。上游字段名（`owner_user_name`、`permissions` 这种）只出现在 LarkX 内部，别泄漏到调用方。
+块树有两层：**块在正文流里的顺序**（`block_sequence`，标题下的正文就是靠顺序排在标题后面，不是它的子块）和**父子层级**（`data.children`，只有列表子项、表格单元格这类才用得上）。`insert_block(parent_id=...)` 往第二层插，读取侧要认这个层级才对得上：`document_outline` 的块带 `children` 子块树，markdown 里嵌套列表缩进两格。上游字段名（`owner_user_name`、`permissions` 这种）只出现在 LarkX 内部，别泄漏到调用方。
 
 加协作者的细节（`SpaceClient.add_member`）：
 
