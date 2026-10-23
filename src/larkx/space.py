@@ -40,7 +40,7 @@ _CSS_COLOR_RE = re.compile(r"^(#[0-9a-f]{3,8}|rgba?\(|hsla?\()", re.I)
 _LISTS = ("bullet", "ordered", "todo")
 # 能改文字的块类型：段落、列表项、待办、引用、代码块（表格/画板/分割线改不了）
 _EDITABLE_BLOCKS = ("text", "bullet", "ordered", "todo", "quote", "code")
-_HEADINGS = {"heading1": 1, "heading2": 2, "heading3": 3, "heading4": 4, "heading5": 5, "heading6": 6}
+_HEADINGS = {f"heading{level}": level for level in range(1, 10)}
 # 可插入/可切换的块类型：正文、1~9 级标题、列表、待办、引用、代码块、分割线
 BLOCK_TYPES = frozenset({"text", "bullet", "ordered", "todo", "quote", "code", "divider"}
                         | {f"heading{level}" for level in range(1, 10)})
