@@ -707,3 +707,19 @@ def test_decrypt_image_returns_plain_bytes():
     assert sniff_image_type(plain) == "image/png"
     assert sniff_image_type(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "image/webp"
     assert sniff_image_type(b"xx") == "application/octet-stream"
+
+
+def test_message_attachments_normalizes_resource_kinds():
+    from larkx.media import message_attachments
+    assert message_attachments(4, {"richText": {}}) == []
+    assert message_attachments(3, {"key": "file_v3_1", "name": "a.txt", "size": 12, "mime": "text/plain"}) == [
+        {"kind": "file", "key": "file_v3_1", "name": "a.txt", "size": 12, "mime": "text/plain"}]
+    assert message_attachments(15, {"key": "file_v3_2", "name": "a.mp4", "size": 8, "duration": 2000}) == [
+        {"kind": "video", "key": "file_v3_2", "name": "a.mp4", "size": 8, "duration": 2000}]
+    assert message_attachments(7, {"key": "file_v3_3", "duration": 3000}) == [
+        {"kind": "audio", "key": "file_v3_3", "duration": 3000}]
+    assert message_attachments(5, {"imageV2": {"imageKey": "img_v3_1", "variants": [
+        {"type": 1, "size": {"width": 20, "height": 10}}]}}) == [
+        {"kind": "image", "key": "img_v3_1", "width": 20, "height": 10}]
+    assert message_attachments(20, {"name": "公司", "latitude": "39.9", "longitude": "116.4"}) == [
+        {"kind": "location", "name": "公司", "latitude": "39.9", "longitude": "116.4"}]

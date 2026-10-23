@@ -148,3 +148,45 @@ def sniff_image_type(blob: bytes) -> str:
     if blob.startswith(b'BM'):
         return 'image/bmp'
     return 'application/octet-stream'
+
+
+def message_attachments(message_type: int, content: dict) -> list[dict]:
+    """把消息内容里的资源整理成统一的附件列表：[{kind, key, ...}]。
+
+    各种消息类型带的资源不一样（图片是 key+宽高，文件是 key+名字+大小，视频还有时长），
+    这里统一成 kind + 各自的字段，调用方不用认识飞书的字段名。
+    """
+    content = content or {}
+    if message_type == 5:
+        return [{"kind": "image", "key": item["key"], "width": item["width"], "height": item["height"]}
+                for item in image_resources(content) if item.get("key")]
+    if message_type in (3, 13):
+        return [{"kind": "file", "key": content.get("key", ""), "name": content.get("name", ""),
+                 "size": int(content.get("size") or 0), "mime": content.get("mime", "")}]
+    if message_type == 15:
+        return [{"kind": "video", "key": content.get("key", ""), "name": content.get("name", ""),
+                 "size": int(content.get("size") or 0), "duration": int(content.get("duration") or 0)}]
+    if message_type == 7:
+        return [{"kind": "audio", "key": content.get("key", ""),
+                 "duration": int(content.get("duration") or 0)}]
+    if message_type == 10:
+        return [{"kind": "sticker", "key": content.get("key", ""), "sticker_id": content.get("stickerId", "")}]
+    if message_type == 20:
+        return [{"kind": "location", "name": content.get("name", ""),
+                 "latitude": content.get("latitude", ""), "longitude": content.get("longitude", "")}]
+    if message_type == 23:
+        return [{"kind": "user_card", "user_id": content.get("userId", ""), "name": content.get("name", "")}]
+    if message_type == 2:
+        return [{"kind": "post", "title": content.get("title", "")}]
+    if message_type == 14:
+        header = content.get("cardHeader") or {}
+        return [{"kind": "card", "title": header.get("title") or header.get("mainTitle") or ""}]
+    if message_type == 11:
+        return [{"kind": "merge_forward", "count": len(content.get("messages") or [])}]
+    if message_type == 9:
+        chat = content.get("chat") or {}
+        return [{"kind": "group_share", "chat_id": content.get("chatId") or chat.get("id", ""),
+                 "name": chat.get("name", "")}]
+    if message_type == 16:
+        return [{"kind": "calendar_event", "attendees_count": int(content.get("attendeesCount") or 0)}]
+    return []
