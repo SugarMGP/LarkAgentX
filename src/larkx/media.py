@@ -151,16 +151,22 @@ def sniff_image_type(blob: bytes) -> str:
 
 
 def message_attachments(message_type: int, content: dict) -> list[dict]:
-    """把消息内容里的资源整理成统一的附件列表：[{key, name, size}]。
+    """把消息内容里的资源整理成统一的附件列表：[{kind, key, name, size}]。
 
-    图片、文件、视频、语音都算"文件"，只是 key 前缀不同（img_v3_ / file_v3_），
+    kind 区分资源类型（图片/文件/视频/语音），因为它们的 key 前缀和下载方式都不一样；
     位置、名片这类没有资源的类型不进附件。
     """
     content = content or {}
     if message_type == 5:
-        return [{"key": item["key"], "name": "", "size": int(content.get("originSize") or 0)}
+        return [{"kind": "image", "key": item["key"], "name": "", "size": int(content.get("originSize") or 0)}
                 for item in image_resources(content) if item.get("key")]
-    if message_type in (3, 13, 15, 7):
-        return [{"key": content.get("key", ""), "name": content.get("name", ""),
+    if message_type in (3, 13):
+        return [{"kind": "file", "key": content.get("key", ""), "name": content.get("name", ""),
+                 "size": int(content.get("size") or 0)}]
+    if message_type == 15:
+        return [{"kind": "video", "key": content.get("key", ""), "name": content.get("name", ""),
+                 "size": int(content.get("size") or 0)}]
+    if message_type == 7:
+        return [{"kind": "audio", "key": content.get("key", ""), "name": "",
                  "size": int(content.get("size") or 0)}]
     return []
