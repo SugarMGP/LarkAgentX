@@ -878,6 +878,13 @@ class SpaceClient:
             raise SpaceError(f'移除协作者失败: {result}')
         return {"removed": str(owner_id)}
 
+    def delete_document(self, url_or_token: str, obj_type: int = OBJ_TYPE_DOC) -> dict:
+        """删掉一篇文档（进回收站）。只有文档所有者能删。"""
+        token, _, _ = self._doc_token(url_or_token)
+        return self._post('/space/api/explorer/obj/delete/',
+                           params={'obj_token': token, 'obj_type': str(obj_type)},
+                           headers=self._csrf_headers())
+
     def update_title(self, url_or_token: str, title: str) -> dict:
         """改文档标题，返回 {"token", "title"}。"""
         token, _, _ = self._doc_token(url_or_token)
