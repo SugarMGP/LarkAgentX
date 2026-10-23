@@ -263,10 +263,11 @@ def _blocks_to_markdown(block_map: dict, sequence: list[str]) -> str:
         if btype == "page":
             return render_children(children(bid))
         if btype in _HEADINGS:
-            return [f"{'#' * _HEADINGS[btype]} {_block_text(block)}".rstrip()]
+            lines = [f"{'#' * _HEADINGS[btype]} {_block_text(block)}".rstrip()]
+            return lines + render_children(children(bid))
         if btype == "code":
             language = data.get("language") or ""
-            return [f"```{language}\n{_block_text(block)}\n```"]
+            return [f"```{language}\n{_block_text(block)}\n```"] + render_children(children(bid))
         if btype in _LISTS:
             marker = {"bullet": "- ", "ordered": "1. ", "todo": "- [ ] "}[btype]
             lines = [marker + _block_text(block)] if _block_text(block) else []
@@ -274,7 +275,8 @@ def _blocks_to_markdown(block_map: dict, sequence: list[str]) -> str:
                 lines.extend(render(child))
             return ["\n".join(lines)] if lines else []
         if btype == "quote":
-            return ["\n".join("> " + line for line in _block_text(block).split("\n"))]
+            lines = ["\n".join("> " + line for line in _block_text(block).split("\n"))]
+            return lines + render_children(children(bid))
         if btype == "divider":
             return ["---"]
         if btype == "table":

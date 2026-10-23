@@ -103,7 +103,9 @@ IM 网关：
 | `delete_section` | `{blocks: [被删的块 id]}` |
 | `add_member` / `remove_member` / `update_title` | `{success_count, fail_owners}` / `{removed}` / `{token, title}` |
 
-要原始结构就用 `document_blocks`（块树本身就是协议结构）。上游字段名（`owner_user_name`、`permissions` 这种）只出现在 LarkX 内部，别泄漏到调用方。
+要原始结构就用 `document_blocks`（块树本身就是协议结构）。
+
+块树有两层：**块在正文流里的顺序**（`block_sequence`，标题下的正文就是靠顺序排在标题后面，不是它的子块）和**父子层级**（`data.children`，只有列表子项、表格单元格这类才用得上）。`insert_block(parent_id=...)` 只能往第二层插；插进去的块不在 `block_sequence` 里，所以 `document_outline` 看不到它——**要让 agent 能写能读，读取侧必须先认层级**，否则写进去的块等于丢了。上游字段名（`owner_user_name`、`permissions` 这种）只出现在 LarkX 内部，别泄漏到调用方。
 
 加协作者的细节（`SpaceClient.add_member`）：
 
