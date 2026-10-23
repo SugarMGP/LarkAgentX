@@ -720,11 +720,6 @@ class SpaceClient:
         token, _, _ = self._doc_token(url_or_token)
         return self._get('/space/api/suite/permission/members.v2/', token=token, type=OBJ_TYPE_DOC)
 
-    def document_permission(self, url_or_token: str) -> dict:
-        """文档的链接分享设置：谁拿到链接能看、能编辑、密级联动等。"""
-        token, _, _ = self._doc_token(url_or_token)
-        return self._get('/space/api/suite/permission/public.v4/', token=token, type=OBJ_TYPE_DOC)
-
     def remove_member(self, token: str, owner_id: str, owner_type: int = 1,
                       obj_type: int = OBJ_TYPE_DOC) -> dict:
         """把协作者从文档上移除。owner_id 是飞书数字 id，owner_type：1=用户、2=群组。"""
