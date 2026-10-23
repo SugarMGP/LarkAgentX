@@ -290,7 +290,7 @@ def test_update_block_text_replaces_the_body(monkeypatch):
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     monkeypatch.setattr("larkx.space.requests.post", fake_post)
-    SpaceClient(auth_stub()).update_block_text("doc1", "b1", "new text")
+    out = SpaceClient(auth_stub()).update_block_text("doc1", "b1", "new text")
 
     url, body, headers = posts[0]
     assert url.endswith("/space/api/docx/blocks/user_change")
@@ -300,6 +300,8 @@ def test_update_block_text_replaces_the_body(monkeypatch):
     # 旧正文 3 个字换成 8 个字：长度差 +5，删掉旧的 3 个，插入新的 8 个。
     assert change["payload"]["ops"][0]["subType"]["o"]["zone_changesets"]["0"] == "Z:3>5=0-3*0+8$new text"
     assert "X-CSRFToken" in headers
+    # 返回整理过的结果：块 id 和新版本号。
+    assert out == {"block_id": "b1", "version": 0}
 
 
 def test_insert_block_creates_the_block_and_links_it_into_the_parent(monkeypatch):
@@ -398,13 +400,24 @@ def test_document_meta_and_members_use_the_document_token(monkeypatch):
         if 'wiki' in url:
             return FakeResponse({"code": 0, "data": {"node": {"obj_token": "T1", "space_id": "S1"}}})
         if 'meta' in url:
-            return FakeResponse({"code": 0, "data": {"title": "周报", "owner_id": "u1"}})
-        return FakeResponse({"code": 0, "data": {"members": [{"owner_id": "u1", "is_owner": True}]}})
+            return FakeResponse({"code": 0, "data": {"title": "周报", "owner_id": "u1",
+                                                   "owner_user_name": "张三", "obj_token": "T1",
+                                                   "obj_type": "docx", "create_time": 10, "edit_time": 20}})
+        return FakeResponse({"code": 0, "data": {"total_num": 1, "members": [
+            {"owner_id": "u1", "owner_name": "张三", "is_owner": True, "permissions": 1039,
+             "owner_type": 0}]}})
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     space = SpaceClient(auth_stub())
-    assert space.document_meta("https://x.feishu.cn/wiki/W1")["title"] == "周报"
-    assert space.document_members("https://x.feishu.cn/wiki/W1")["members"][0]["owner_id"] == "u1"
+    meta = space.document_meta("https://x.feishu.cn/wiki/W1")
+    # 整理过的字段，不透传上游的 owner_user_name 这类名字。
+    assert meta["title"] == "周报" and meta["token"] == "T1" and meta["type"] == "docx"
+    assert meta["owner"] == {"id": "u1", "name": "张三"}
+    assert meta["create_time"] == 10 and meta["update_time"] == 20
+    members = space.document_members("https://x.feishu.cn/wiki/W1")
+    assert members["total"] == 1
+    assert members["members"] == [{"id": "u1", "name": "张三", "kind": "user",
+                                   "is_owner": True, "permission": "edit"}]
     # wiki 链接先换成真实文档 token，这些接口只认文档 token
     assert [p for url, p in calls if 'meta' in url] == [{"token": "T1", "type": 22}]
     assert [p for url, p in calls if 'members' in url] == [{"token": "T1", "type": 22}]
@@ -422,7 +435,7 @@ def test_remove_member_posts_owner_and_type(monkeypatch):
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     monkeypatch.setattr("larkx.space.requests.post", fake_post)
-    SpaceClient(auth_stub()).remove_member("doc1", "g1", owner_type=2)
+    assert SpaceClient(auth_stub()).remove_member("doc1", "g1", owner_type=2) == {"removed": "g1"}
 
     url, data, headers = posts[0]
     assert url.endswith("/space/api/suite/permission/members/delete/")
@@ -442,7 +455,7 @@ def test_update_title_posts_the_new_title(monkeypatch):
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     monkeypatch.setattr("larkx.space.requests.post", fake_post)
-    SpaceClient(auth_stub()).update_title("doc1", "新标题")
+    assert SpaceClient(auth_stub()).update_title("doc1", "新标题") == {"token": "doc1", "title": "新标题"}
 
     url, body = posts[0]
     assert url.endswith("/space/api/doc.v2/update_title")
@@ -537,7 +550,8 @@ def test_delete_section_drops_nested_children_and_deletes_once(monkeypatch):
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     monkeypatch.setattr("larkx.space.requests.post", fake_post)
-    SpaceClient(auth_stub()).delete_section("doc1", "h1")
+    assert SpaceClient(auth_stub()).delete_section("doc1", "h1") == {
+        "blocks": ["h1", "p1", "b1", "p2"]}
 
     # 一次请求，父块上的操作从后往前，标题和它下面所有正文一起删，bullet 的子项不单独删。
     assert len(posts) == 1

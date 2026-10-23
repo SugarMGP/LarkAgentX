@@ -82,6 +82,12 @@ def _b36(number: int) -> str:
     return _b36(number // 36) + digits[number % 36]
 
 
+def _ack_version(response: dict, block_id: str) -> int:
+    """写操作后服务端回的新版本号，在响应的 block_map 里；没有就是 0。"""
+    item = ((response or {}).get("block_map") or {}).get(block_id) or {}
+    return int(item.get("version") or 0)
+
+
 def _version(block: dict) -> int:
     """块的版本号（飞书拿它做乐观锁）。0 是合法值，只有服务端没给时才当 1。"""
     value = block.get('version')
@@ -593,10 +599,11 @@ class SpaceClient:
         if block is None:
             raise SpaceError(f'文档里没有这个块: {block_id}')
         old = _block_text(block)
-        return self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
-                                                      "payload": {"ops": [
-                                                          self._text_op(len(old), text, keep=len(old) if append else 0,
-                                                                        drop=not append)]}}})
+        response = self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
+                                                          "payload": {"ops": [
+                                                              self._text_op(len(old), text, keep=len(old) if append else 0,
+                                                                            drop=not append)]}}})
+        return {"block_id": block_id, "version": _ack_version(response, block_id)}
 
     def _text_op(self, old_len: int, text: str, *, keep: int = 0, drop: bool = False) -> dict:
         """把块正文改成 text 的一条 changeset 操作。
@@ -658,7 +665,7 @@ class SpaceClient:
                         "payload": {"ops": [
                             {"p": ["children", index], "action": {"li": block_id}}]}}})
         return {"block_id": block_id, "parent_id": parent_id, "index": index,
-                "response": response}
+                "version": _ack_version(response, block_id)}
 
     def set_block_type(self, url_or_token: str, block_id: str, block_type: str) -> dict:
         """把已有块换成另一种类型（段↔标题↔列表↔待办↔引用↔代码块），返回服务端响应。
@@ -672,8 +679,9 @@ class SpaceClient:
             raise SpaceError(f'文档里没有这个块: {block_id}')
         old_type = str((block.get('data') or {}).get('type') or 'text')
         op = {"p": ["type"], "action": {"od": old_type, "oi": block_type}}
-        return self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
-                                                      "payload": {"ops": [op]}}})
+        response = self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
+                                                          "payload": {"ops": [op]}}})
+        return {"block_id": block_id, "version": _ack_version(response, block_id), "type": block_type}
 
     def delete_block(self, url_or_token: str, block_id: str) -> dict:
         """删掉一个块（连同它的子块）。返回服务端的响应。
@@ -693,12 +701,13 @@ class SpaceClient:
             raise SpaceError(f'这个块不在父块的子块列表里: {block_id}')
         index = children.index(block_id)
         op = {"p": ["children", index], "action": {"ld": block_id}}
-        return self._post_block_op(token, {parent_id: {"id": parent_id,
-                                                      "version": _version(parent),
-                                                      "payload": {"ops": [op]}}})
+        response = self._post_block_op(token, {parent_id: {"id": parent_id,
+                                                          "version": _version(parent),
+                                                          "payload": {"ops": [op]}}})
+        return {"block_id": block_id, "version": _ack_version(response, block_id)}
 
-    def delete_section(self, url_or_token: str, heading_block_id: str) -> list[dict]:
-        """删掉一个章节：标题块和它下面的正文块。返回每次删除请求的响应。
+    def delete_section(self, url_or_token: str, heading_block_id: str) -> dict:
+        """删掉一个章节：标题块和它下面的正文块。返回 {"blocks": [被删的块 id]}。
 
         整篇只读一次：父块被删时子块会跟着没，所以子孙块不再单独删（否则会报块不存在）；
         同一个父块下的多个块合成一次请求，从后往前删，序号才不会错位。
@@ -735,10 +744,10 @@ class SpaceClient:
                 if block_id not in children:
                     raise SpaceError(f'这个块不在父块的子块列表里: {block_id}')
                 ops.append({"p": ["children", children.index(block_id)], "action": {"ld": block_id}})
-            results.append(self._post_block_op(token, {
+            self._post_block_op(token, {
                 parent_id: {"id": parent_id, "version": _version(parent),
-                            "payload": {"ops": ops}}}))
-        return results
+                            "payload": {"ops": ops}}})
+        return {"blocks": victims}
 
     def _post_block_op(self, token: str, change_map: dict) -> dict:
         return self._post('/space/api/docx/blocks/user_change',
@@ -753,22 +762,50 @@ class SpaceClient:
         return self._doc_token(url_or_token)[0]
 
     def document_meta(self, url_or_token: str) -> dict:
-        """文档元数据：标题、所有者、创建/最后修改人、时间、密级等。
+        """文档元数据：标题、所有者、创建/最后修改人、创建/修改时间。
 
-        wiki 链接会自动换成真实文档 token（这些接口只认文档 token）。
+        字段是整理过的稳定名字，不透传飞书原始响应；wiki 链接会自动换成真实文档 token。
         """
         token, _, _ = self._doc_token(url_or_token)
-        return self._get('/space/api/meta/', token=token, type=OBJ_TYPE_DOC)
+        data = self._get('/space/api/meta/', token=token, type=OBJ_TYPE_DOC)
+        return {
+            "token": str(data.get("obj_token") or token),
+            "title": str(data.get("title") or ""),
+            "type": str(data.get("obj_type") or ""),
+            "url": str(data.get("url") or ""),
+            "owner": {"id": str(data.get("owner_id") or ""), "name": str(data.get("owner_user_name") or "")},
+            "creator": {"id": str(data.get("create_uid") or ""), "name": str(data.get("create_user_name") or "")},
+            "last_editor": {"name": str(data.get("edit_user_name") or "")},
+            "create_time": int(data.get("create_time") or 0),
+            "update_time": int(data.get("edit_time") or 0),
+        }
 
     def document_path(self, url_or_token: str) -> dict:
-        """文档所在位置：云空间/知识库的层级路径，nodes 里是各级节点。"""
+        """文档所在位置：{"path": ["我的空间", "周报"]}，云空间里的层级；wiki 文档是空数组。"""
         token, _, _ = self._doc_token(url_or_token)
-        return self._get('/space/api/explorer/v2/obj/path/', obj_token=token, obj_type=OBJ_TYPE_DOC)
+        data = self._get('/space/api/explorer/v2/obj/path/', obj_token=token, obj_type=OBJ_TYPE_DOC)
+        nodes = (data.get("entities") or {}).get("nodes") or {}
+        return {"path": [str((nodes.get(node_id) or {}).get("name") or "")
+                         for node_id in data.get("path") or []]}
 
     def document_members(self, url_or_token: str) -> dict:
-        """文档的协作者（可访问人）列表：members 是人，entities.users 是他们的资料。"""
+        """文档的协作者（可访问人）：{"total": n, "members": [{id, name, kind, is_owner, permission}]}。
+
+        kind 是 user 或 group，permission 是 read 或 edit。
+        """
         token, _, _ = self._doc_token(url_or_token)
-        return self._get('/space/api/suite/permission/members.v2/', token=token, type=OBJ_TYPE_DOC)
+        data = self._get('/space/api/suite/permission/members.v2/', token=token, type=OBJ_TYPE_DOC)
+        members = []
+        for member in data.get("members") or []:
+            members.append({
+                "id": str(member.get("owner_id") or ""),
+                "name": str(member.get("owner_name") or ""),
+                "kind": "group" if member.get("owner_type") == 2 else "user",
+                "is_owner": bool(member.get("is_owner")),
+                # 飞书的权限位掩码：4 是可编辑，1 是可读。
+                "permission": "edit" if int(member.get("permissions") or 0) & 4 else "read",
+            })
+        return {"total": int(data.get("total_num") or len(members)), "members": members}
 
     def remove_member(self, token: str, owner_id: str, owner_type: int = 1,
                       obj_type: int = OBJ_TYPE_DOC) -> dict:
@@ -780,14 +817,15 @@ class SpaceClient:
                              headers=self._csrf_headers())
         if not result.get('ret'):
             raise SpaceError(f'移除协作者失败: {result}')
-        return result
+        return {"removed": str(owner_id)}
 
     def update_title(self, url_or_token: str, title: str) -> dict:
-        """改文档标题。"""
+        """改文档标题，返回 {"token", "title"}。"""
         token, _, _ = self._doc_token(url_or_token)
-        return self._post('/space/api/doc.v2/update_title',
-                          json_body={'token': token, 'obj_type': OBJ_TYPE_DOC, 'title': title},
-                          headers=self._csrf_headers())
+        self._post('/space/api/doc.v2/update_title',
+                   json_body={'token': token, 'obj_type': OBJ_TYPE_DOC, 'title': title},
+                   headers=self._csrf_headers())
+        return {"token": token, "title": title}
 
     # ---------- 协作权限 ----------
 
@@ -805,7 +843,7 @@ class SpaceClient:
         表示不通知对方，链接由调用方自己发出去。
         """
         if not user_ids:
-            return {'success_count': 0}
+            return {"success_count": 0, "fail_owners": []}
         owners = [{'owner_id': user_id, 'owner_type': owner_type, 'permission': permission}
                   for user_id in user_ids]
         result = self._post('/space/api/suite/permission/members/create/',
@@ -815,4 +853,5 @@ class SpaceClient:
                              headers=self._csrf_headers())
         if (result.get('success_count') or 0) != len(user_ids):
             raise SpaceError(f'加协作者失败: {result}')
-        return result
+        return {"success_count": int(result.get('success_count') or 0),
+                "fail_owners": list(result.get('fail_owners') or [])}
