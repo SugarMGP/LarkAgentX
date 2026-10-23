@@ -1,9 +1,9 @@
+import mimetypes
 import os
 import re
 from urllib.parse import urlsplit
 
 import requests
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from loguru import logger
 from .auth import LarkAuth
 from .config import load_config
@@ -13,7 +13,7 @@ UPLOAD_TIMEOUT = 300
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
 
 
-def _upload_headers(auth: LarkAuth) -> dict:
+def _web_headers(auth: LarkAuth) -> dict:
     return {
         'origin': auth.region.web_origin,
         'referer': f'{auth.region.web_origin}/',
@@ -27,7 +27,7 @@ def upload_image(auth: LarkAuth, data: bytes, name: str='image.png') -> str:
     """上传图片，返回图片 key（img_v3_…）；发图片消息前先调它。"""
     resp = requests.post(f'{auth.region.file_host}/api/image',
                          files={'image': (name, data)}, cookies=auth.cookies,
-                         headers=_upload_headers(auth), timeout=UPLOAD_TIMEOUT)
+                         headers=_web_headers(auth), timeout=UPLOAD_TIMEOUT)
     resp.raise_for_status()
     key = re.search(r'img_[\w-]+', resp.text)
     if not key:
@@ -40,7 +40,7 @@ def upload_file(auth: LarkAuth, chat_id: str, data: bytes, name: str) -> dict:
     """上传文件到会话（文件归属于会话），返回 {key, name, size, mime}。"""
     resp = requests.post(f'{auth.region.file_host}/api/chats/{chat_id}/files',
                          files={'file': (name, data)}, cookies=auth.cookies,
-                         headers=_upload_headers(auth), timeout=UPLOAD_TIMEOUT)
+                         headers=_web_headers(auth), timeout=UPLOAD_TIMEOUT)
     resp.raise_for_status()
     body = resp.json()
     info = body.get('data') or {}
@@ -80,74 +80,38 @@ def download(auth: LarkAuth, url: str, out_path: str=None, max_bytes: int=200 * 
         return (out_path, content_type, n)
 
 
-def image_resources(content: dict) -> list[dict]:
-    """从消息内容里取图片资源。
-
-    content 是 decode_message_content 解出来的结构。新版图片在 imageV2 里：
-    key 是图片 key（img_v3_…），crypto 是解密用的 {key, iv, aad}（没有就是明文图片），
-    thumbnail 是消息里内联的缩略图字节（webp）。
-    """
-    out = []
-    image = (content or {}).get("image") or {}
-    v2 = (content or {}).get("imageV2") or {}
+def image_keys(content: dict) -> list[str]:
+    """从消息内容里取图片 key（img_v3_…）。新版图片在 imageV2 里，旧版在 image 里。"""
+    content = content or {}
+    v2 = content.get("imageV2") or {}
     if v2.get("imageKey"):
-        cipher = ((v2.get("crypto") or {}).get("cipher")) or {}
-        width = height = 0
-        for variant in v2.get("variants") or []:
-            size = variant.get("size") or {}
-            width, height = int(size.get("width") or 0), int(size.get("height") or 0)
-            break
-        out.append({
-            "key": str(v2.get("imageKey") or ""),
-            "width": width,
-            "height": height,
-            "crypto": ({
-                "key": cipher.get("key") or b"",
-                "iv": cipher.get("iv") or b"",
-                "aad": cipher.get("extra") or b"",
-            } if cipher.get("key") else None),
-            "thumbnail": v2.get("thumbnailInline") or b"",
-        })
-    elif image.get("imageKey") or image.get("key"):
-        origin = image.get("origin") or {}
-        out.append({
-            "key": str(image.get("imageKey") or image.get("key") or ""),
-            "width": int(origin.get("width") or 0),
-            "height": int(origin.get("height") or 0),
-            "crypto": None,
-            "thumbnail": b"",
-        })
-    return out
+        return [str(v2["imageKey"])]
+    image = content.get("image") or {}
+    origin = image.get("origin") or {}
+    key = origin.get("key") or image.get("imageKey") or image.get("key")
+    return [str(key)] if key else []
 
 
-def open_image(auth: LarkAuth, image_key: str):
-    """打开图片的上游响应。字节是加密的（有 crypto 时要自己解密）。"""
-    resp = requests.get(f'{auth.region.file_host}/static-resource/image/{image_key}',
-                        cookies=auth.cookies, headers=_upload_headers(auth), stream=True, timeout=60)
+def download_message_resource(auth: LarkAuth, key: str, message_id: str = '') -> tuple[bytes, str]:
+    """按资源 key 取回消息里的原始字节（图片/文件/视频/语音通用，服务端返回明文）。
+
+    图片的 key 绑在消息上，要带上那条消息的 message_id；文件/视频/语音只认 key。
+    返回 (字节, content-type)：飞书对视频也回 text/plain，这里按文件名重猜一次。
+    """
+    url = f'{auth.region.file_host}/download/messages/{message_id}/keys/{key}'
+    resp = requests.get(url, cookies=auth.cookies, headers=_web_headers(auth), timeout=60)
+    if resp.status_code == 400:
+        raise KeyError(f'飞书不认这个资源 key: {key}')
     resp.raise_for_status()
-    return resp
+    name = _attachment_name(resp.headers.get('content-disposition', ''))
+    content_type = mimetypes.guess_type(name)[0] or resp.headers.get('content-type') or 'application/octet-stream'
+    return resp.content, content_type
 
 
-def decrypt_image(blob: bytes, crypto: dict) -> bytes:
-    """用消息里的 crypto 解密图片字节（AES-256-GCM）。"""
-    if not crypto:
-        return blob
-    return AESGCM(crypto["key"]).decrypt(crypto["iv"], blob, crypto.get("aad") or b"")
-
-
-def sniff_image_type(blob: bytes) -> str:
-    """看字节头猜图片类型。"""
-    if blob.startswith(b'\x89PNG\r\n\x1a\n'):
-        return 'image/png'
-    if blob.startswith(b'\xff\xd8\xff'):
-        return 'image/jpeg'
-    if blob.startswith(b'GIF8'):
-        return 'image/gif'
-    if blob[:4] == b'RIFF' and blob[8:12] == b'WEBP':
-        return 'image/webp'
-    if blob.startswith(b'BM'):
-        return 'image/bmp'
-    return 'application/octet-stream'
+def _attachment_name(disposition: str) -> str:
+    """从 Content-Disposition 里取文件名。"""
+    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition or '')
+    return match.group(1).strip() if match else ''
 
 
 def message_attachments(message_type: int, content: dict) -> list[dict]:
@@ -158,8 +122,8 @@ def message_attachments(message_type: int, content: dict) -> list[dict]:
     """
     content = content or {}
     if message_type == 5:
-        return [{"kind": "image", "key": item["key"], "name": "", "size": int(content.get("originSize") or 0)}
-                for item in image_resources(content) if item.get("key")]
+        return [{"kind": "image", "key": key, "name": "", "size": int(content.get("originSize") or 0)}
+                for key in image_keys(content)]
     if message_type in (3, 13):
         return [{"kind": "file", "key": content.get("key", ""), "name": content.get("name", ""),
                  "size": int(content.get("size") or 0)}]

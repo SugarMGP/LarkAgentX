@@ -81,9 +81,12 @@ def test_reply_relations_use_root_and_parent_only():
 
 
 class FakeResponse:
-    def __init__(self, text="", body=None):
+    def __init__(self, text="", body=None, content=b"", headers=None, status_code=200):
         self.text = text
         self._body = body or {}
+        self.content = content
+        self.headers = headers or {}
+        self.status_code = status_code
 
     def raise_for_status(self):
         return None
@@ -168,3 +171,33 @@ def test_download_only_sends_cookies_to_the_same_region(monkeypatch):
     assert seen["cookies"] == {"session": "s"}
     media.download(auth, "https://evil.example.com/x")
     assert seen["cookies"] == {}
+
+
+def test_download_message_resource_returns_plain_bytes(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        return FakeResponse(content=b"hello file", headers={
+            "content-type": "text/plain; charset=utf-8",
+            "content-disposition": 'attachment; filename="note.txt"'})
+
+    monkeypatch.setattr(media.requests, "get", fake_get)
+    blob, content_type = media.download_message_resource(auth_stub(), "file_v3_1", "m1")
+    assert blob == b"hello file"
+    assert content_type == "text/plain"
+    assert captured["url"] == "https://file.example/download/messages/m1/keys/file_v3_1"
+
+
+def test_download_message_resource_guesses_type_from_name(monkeypatch):
+    monkeypatch.setattr(media.requests, "get", lambda url, **kwargs: FakeResponse(
+        content=b"\x00\x00\x00 ftyp", headers={"content-type": "text/plain",
+                                                 "content-disposition": 'attachment; filename="clip.mp4"'}))
+    _, content_type = media.download_message_resource(auth_stub(), "file_v3_2", "m2")
+    assert content_type == "video/mp4"
+
+
+def test_download_message_resource_reports_unknown_key(monkeypatch):
+    monkeypatch.setattr(media.requests, "get", lambda url, **kwargs: FakeResponse(status_code=400))
+    with pytest.raises(KeyError, match="资源 key"):
+        media.download_message_resource(auth_stub(), "file_v3_bad", "m3")
