@@ -197,6 +197,30 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
 
 抓这些 op 的办法（headless 里 `Input.dispatchKeyEvent` 不生效，必须 headful）：`/Applications/Google Chrome.app/... --remote-debugging-port=9336 --user-data-dir=/tmp/x`，CDP 连上后先 `Network.setCookie` 注入 cookie、导航到文档，**用 `Input.dispatchMouseEvent` 真点**进某个块（`Input.insertText` 会改 DOM 但光标键不响应，`Home`/方向键在未真点聚焦时是空操作），再用 `Input.dispatchKeyEvent` 发回车/字符。注意 CDP 客户端要用单个 reader 任务分发消息，`call()` 里顺手 `recv()` 会把 `Network.requestWillBeSent` 事件吞掉。
 
+## 消息类型：24 种，一个接口全发
+
+协议枚举 `entities.Message.Type` 有 24 种（0/2~20/22~25，1 和 21 没用）。**发消息只有一个接口**：`messages.PutMessageRequest`（网关 cmd 5），靠 `type` 区分，每种类型用 `content` 里的不同字段：
+
+| type | 名称 | content 字段 | 实测 |
+|---|---|---|---|
+| 4 | TEXT 文字 | `richText`（可含 IMG 元素 → 图文混排） | ✅ |
+| 2 | POST 富文本 | `title` + `richText` | ✅（带 IMG 元素会 400） |
+| 5 | IMAGE 图片 | `cryptoToken`=image key | ✅ |
+| 3 / 13 | FILE / CLOUD_FILE | `fileKey` `fileName` `fileMime` `fileSize` | ✅ |
+| 15 | MEDIA 视频 | `fileKey` `fileName` `fileMime` `fileSize` + `duration` | ✅ |
+| 7 | AUDIO 语音 | `audioKey` + `audioDuration` | ✅（缺音频上传口） |
+| 23 | SHARE_USER_CARD 用户名片 | `shareUserId` | ✅ |
+| 24 | TODO 待办 | `todoOperationContent` | ✅ |
+| 20 | LOCATION 位置 | `location`（LocationContent） | ✗ 400，参数没试出来 |
+| 9 | SHARE_GROUP_CHAT 分享群聊 | `chatId` | ✗ 400，参数没试出来 |
+| 10 | STICKER 表情 | `stickerId` `stickerSetId` | 需要真贴纸 id |
+| 14 | CARD 卡片 | `cardType` `actions` … | 复杂 |
+| 11 | MERGE_FORWARD 合并转发 | `attachments` | 复杂 |
+| 12/16/18 | 日历系列 | `calendarEvent` `calendarType` | 依赖飞书日历对象 |
+| 6/8/17/19/22/25 | 系统/邮件/红包/会议/商业化红包/文件夹 | 服务端产生 | 用不上 |
+
+**图文混排**（一条消息里既有文字又有图片）：用 type=4 的普通文字消息，`richText` 里放一个 tag=2(IMG) 的元素，元素的 `property` 是 `entities.ImImage{imageKey, fsUnit, crypto}`，并把元素 id 放进 `richText.imageIds`；实测发出去、收回来是"看图 [图片]"一条消息。
+
 ## 图片：key、密文和解密
 
 - **上传图片**：`POST {file_host}/api/image`（multipart）→ 返回图片 key `img_v3_…`（`media.upload_image`）。
