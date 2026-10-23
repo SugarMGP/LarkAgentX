@@ -145,6 +145,12 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
 - 块的正文结构：`data.text.initialAttributedTexts = {"attribs": {"0": "*0+23"}, "text": {"0": "正文"}}`。
 - 服务端失败时返回 `{"code":4000028,"msg":"algorithm process fail"}`，多半是 changeset 语法或 version 不对。
 
+**块树操作**（改块结构，走同一个 user_change 接口）：
+
+- 删一个子块：change_map 的 key 是**父块 id**，`ops` 是 `{"p":["children",序号],"action":{"ld":"<子块 id>"}}`。
+- 新建块：应该也是 `{"p":["children",序号],"action":{...}}`，但"插入对象"的参数格式没逆出来（试过 oi/li + 完整块 JSON，服务端都拒）。headless 里回车建段不生效，抓不到真实样本。
+- 所以目前只能**改文字、删块**，不能新增块。
+
 ## 不要留没人用的封装
 
 `LarkClient` 的方法如果只有自己那半个调用方在用，就是负债：会烂掉，还会被下游当成可用能力直接调。删掉比留着好。判断"没人用"要 grep 整个仓库（含 tests）和下游仓库。

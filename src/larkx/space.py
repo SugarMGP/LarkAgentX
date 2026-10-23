@@ -557,6 +557,53 @@ class SpaceClient:
                                                              "payload": {"ops": [op]}}}},
                           headers=self._csrf_headers())
 
+    def delete_block(self, url_or_token: str, block_id: str) -> dict:
+        """删掉一个块（连同它的子块）。返回服务端的响应。
+
+        协议：在父块上发一条块树操作 {"p": ["children", 序号], "action": {"ld": 块 id}}。
+        """
+        token, _, _ = self._doc_token(url_or_token)
+        data = self.document_blocks(token)
+        blocks = data.get('block_map') or {}
+        block = blocks.get(block_id)
+        if block is None:
+            raise SpaceError(f'文档里没有这个块: {block_id}')
+        parent_id = str((block.get('data') or {}).get('parent_id') or '')
+        parent = blocks.get(parent_id) or {}
+        children = (parent.get('data') or {}).get('children') or []
+        if block_id not in children:
+            raise SpaceError(f'这个块不在父块的子块列表里: {block_id}')
+        index = children.index(block_id)
+        op = {"p": ["children", index], "action": {"ld": block_id}}
+        return self._post_block_op(token, {parent_id: {"id": parent_id,
+                                                      "version": int(parent.get('version') or 1),
+                                                      "payload": {"ops": [op]}}})
+
+    def delete_section(self, url_or_token: str, heading_block_id: str) -> list[dict]:
+        """删掉一个章节：标题块和它下面的正文块。返回每个被删块的响应。"""
+        token, _, _ = self._doc_token(url_or_token)
+        data = self.document_blocks(token)
+        blocks = data.get('block_map') or {}
+        order = [b for b in (data.get('block_sequence') or list(blocks)) if b in blocks]
+        if heading_block_id not in order:
+            raise SpaceError(f'文档里没有这个标题: {heading_block_id}')
+        heading = blocks.get(heading_block_id) or {}
+        level = int(str((heading.get('data') or {}).get('type') or 'heading1')[7:] or 1)
+        victims = [heading_block_id]
+        for block_id in order[order.index(heading_block_id) + 1:]:
+            meta = blocks.get(block_id, {}).get('data') or {}
+            kind = str(meta.get('type') or '')
+            if kind.startswith('heading') and int(kind[7:] or 1) <= level:
+                break
+            victims.append(block_id)
+        return [self.delete_block(token, block_id) for block_id in victims]
+
+    def _post_block_op(self, token: str, change_map: dict) -> dict:
+        return self._post('/space/api/docx/blocks/user_change',
+                          json_body={"member_id": "10000000000000", "uuid": str(uuid.uuid4()),
+                                     "page_id": token, "change_map": change_map},
+                          headers=self._csrf_headers())
+
     # ---------- 协作权限 ----------
 
     def search_user(self, query: str) -> list[dict]:
