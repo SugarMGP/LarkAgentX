@@ -16,7 +16,7 @@
 | `client.py` | IM 网关客户端：protobuf over HTTP + WebSocket 长连接，`api(cmd, data)` 统一收发 |
 | `region.py` | 国内版 feishu.cn 与国际版 larksuite.com 的域名差异（同一套协议，只换域名/语言） |
 | `space.py` | 云空间与云文档：JSON over HTTP，和 IM 网关**不是一套协议** |
-| `media.py` | 图片/文件上传（`upload_image`/`upload_file`）、消息资源下载（`download_message_resource`） |
+| `media.py` | 图片/文件上传（`upload_image`/`upload_file`）、消息资源下载（`open_message_resource`，流式） |
 | `proto/` | 协议资产：`lark_all_pb2.py`（消息定义）、`cmd_map.json`（命令号↔类型）、`gateway.py`（按名字解析命令） |
 
 ## 两套协议，别混
@@ -230,6 +230,7 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
   - 图片的 key 绑在消息上，`message_id` 必须对得上；文件/视频/语音只认 key，`message_id` 随便传。
   - 响应带 `Content-Disposition: attachment; filename="xxx"`，但 `Content-Type` 对视频也是默认的 `text/plain`，所以按文件名重猜（`mimetypes`）。
   - key 不存在时上游回 400 `invalid token`，封装里抛 `KeyError`。
+  - `media.open_message_resource(auth, key, message_id)` 返回 `(上游响应, content-type)`，响应是 `stream=True` 的，调用方负责 `close()`；上游的 `Content-Disposition`（真实文件名）在响应头上，下载侧可以直接透传。
 - **走不通的下载路**（别再试）：
   - `GET {file_host}/static-resource/file/{key}` 和 `/static-resource/image/{key}` 返回的是**密文**（比明文多 16 字节 GCM tag）。图片的密钥在消息的 `crypto` 里能解开，但文件/视频/语音的消息内容里**没有密钥**，这条路对它们是死的。
   - IM 网关的 `media.v1.*`（`DownloadFile` 1033、`DownloadFiles` 1151、`DownloadResource` 1044、`GetResourcePath` 1168、`GetResourceUrls` 3163、`DecryptFile` 1155…）在本租户 appid 报 `command: N not found`；就算用 `cmd` 直连网关也拼不出 payload——这些 proto 的定义在网页端的 Rust/WASM SDK 里，前端 JS chunk 只有「命令号↔消息名」对照表，猜字段一律返回 `code 100053 call server api unknown error`。
