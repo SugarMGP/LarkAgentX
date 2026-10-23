@@ -38,6 +38,8 @@ _OP_RE = re.compile(r"(\*[0-9a-z]+|\|[0-9a-z]+|\+[0-9a-z]+|=[0-9a-z]+|-[0-9a-z]+
 _URL_RE = re.compile(r"^(https?:|mailto:|tel:|/)", re.I)
 _CSS_COLOR_RE = re.compile(r"^(#[0-9a-f]{3,8}|rgba?\(|hsla?\()", re.I)
 _LISTS = ("bullet", "ordered", "todo")
+# 能改文字的块类型：段落、列表项、待办、引用、代码块（表格/画板/分割线改不了）
+_EDITABLE_BLOCKS = ("text", "bullet", "ordered", "todo", "quote", "code")
 _HEADINGS = {"heading1": 1, "heading2": 2, "heading3": 3, "heading4": 4, "heading5": 5, "heading6": 6}
 # 可插入/可切换的块类型：正文、1~9 级标题、列表、待办、引用、代码块、分割线
 BLOCK_TYPES = frozenset({"text", "bullet", "ordered", "todo", "quote", "code", "divider"}
@@ -78,6 +80,24 @@ def _b36(number: int) -> str:
     if number < 36:
         return digits[number]
     return _b36(number // 36) + digits[number % 36]
+
+
+def _version(block: dict) -> int:
+    """块的版本号（飞书拿它做乐观锁）。0 是合法值，只有服务端没给时才当 1。"""
+    value = block.get('version')
+    return 1 if value is None else int(value)
+
+
+def _has_ancestor_in(blocks: dict, block_id: str, targets: set, page_token: str) -> bool:
+    """块的祖先里有没有落在 targets 里的（删掉祖先，子块就没了，不用单独删）。"""
+    parent_id = str((blocks.get(block_id, {}).get('data') or {}).get('parent_id') or '')
+    seen = {block_id}
+    while parent_id and parent_id != page_token and parent_id not in seen:
+        if parent_id in targets:
+            return True
+        seen.add(parent_id)
+        parent_id = str((blocks.get(parent_id, {}).get('data') or {}).get('parent_id') or '')
+    return False
 
 
 def _new_block_id(taken: dict) -> str:
@@ -323,6 +343,8 @@ class SpaceClient:
     def __init__(self, auth: LarkAuth):
         self.auth = auth
         self._csrf = ''
+        # 裸 token 的解析结果：知识库节点 token 要换成文档 token，查过一次就不用再查。
+        self._resolved: dict[str, tuple[str, str, str]] = {}
 
     def _get(self, path: str, host: str = '', **params) -> dict:
         url = f'{host or self.auth.region.internal_api_host}{path}'
@@ -501,6 +523,7 @@ class SpaceClient:
         """(真实文档 token, space_id, wiki_token)：wiki 链接、docx 链接或 token 都行。"""
         # 分享链接常带 ?from= 或 #，文档 token 不能带查询串。
         url_or_token = url_or_token.strip().split('?', 1)[0].split('#', 1)[0]
+        raw_token = url_or_token
         token = url_or_token
         space_id, wiki_token = '', ''
         if '/wiki/' in url_or_token:
@@ -510,7 +533,9 @@ class SpaceClient:
             space_id = node['space_id']
         elif url_or_token.startswith('http'):
             token = url_or_token.rstrip('/').rsplit('/', 1)[-1]
-        elif not token.startswith('doxcn'):
+        elif token in self._resolved:
+            token, space_id, wiki_token = self._resolved[token]
+        else:
             # 可能是知识库节点 token：节点里的文档要用真实文档 token 查正文和权限。
             try:
                 node = self.wiki_node(token)
@@ -518,6 +543,7 @@ class SpaceClient:
                 node = {}
             if node.get('obj_token'):
                 token, space_id, wiki_token = node['obj_token'], node.get('space_id', ''), token
+            self._resolved[raw_token] = (token, space_id, wiki_token)
         return token, space_id, wiki_token
 
     def document_markdown(self, url_or_token: str) -> str:
@@ -551,7 +577,7 @@ class SpaceClient:
             elif kind.startswith('heading'):
                 current = {"id": block_id, "level": int(kind[7:] or 1), "title": text, "blocks": []}
                 sections.append(current)
-            elif kind == 'text' and current is not None:
+            elif kind in _EDITABLE_BLOCKS and current is not None:
                 current["blocks"].append({"id": block_id, "type": kind, "text": text})
         return {"token": token, "title": title, "sections": sections}
 
@@ -567,23 +593,22 @@ class SpaceClient:
         if block is None:
             raise SpaceError(f'文档里没有这个块: {block_id}')
         old = _block_text(block)
-        version = int(block.get('version') or 1)
-        keep = len(old) if append else 0
-        ops = f"={_b36(keep)}" + ("" if append else f"-{_b36(len(old))}")
-        return self._post('/space/api/docx/blocks/user_change',
-                          json_body={"member_id": "10000000000000", "uuid": str(uuid.uuid4()),
-                                     "page_id": token,
-                                     "change_map": {block_id: {"id": block_id, "version": version,
-                                                             "payload": {"ops": [
-                                                                 self._text_op(len(old), text, ops)]}}}},
-                          headers=self._csrf_headers())
+        return self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
+                                                      "payload": {"ops": [
+                                                          self._text_op(len(old), text, keep=len(old) if append else 0,
+                                                                        drop=not append)]}}})
 
-    def _text_op(self, old_len: int, text: str, keep_ops: str) -> dict:
-        """把块正文改成 text 的一条 changeset 操作（text 之前的保留/删除由 keep_ops 描述）。"""
+    def _text_op(self, old_len: int, text: str, *, keep: int = 0, drop: bool = False) -> dict:
+        """把块正文改成 text 的一条 changeset 操作。
+
+        keep 是原文中保留的字数，drop 表示把剩下的旧字全删掉；长度差按"改完之后的
+        正文总长减旧长度"算。
+        """
         length = len(text)
-        delta = length - old_len
+        delta = keep + length - old_len
         diff = f">{_b36(delta)}" if delta >= 0 else f"<{_b36(-delta)}"
-        changeset = f"Z:{_b36(old_len)}{diff}{keep_ops}*0+{_b36(length)}${text}"
+        ops = (f"={_b36(keep)}" if keep or drop else "") + (f"-{_b36(old_len - keep)}" if drop else "")
+        changeset = f"Z:{_b36(old_len)}{diff}{ops}*0+{_b36(length)}${text}"
         return {"p": ["text"], "subType": {"t": "easysync", "o": {
             "zone_changesets": {"0": changeset},
             "apool": {"numToAttrib": {"0": ["author", self.auth.user_id]}, "nextNum": 1,
@@ -616,7 +641,8 @@ class SpaceClient:
         children = list((parent.get('data') or {}).get('children') or [])
         index = len(children) if index is None else max(0, min(int(index), len(children)))
         block_id = _new_block_id(blocks)
-        new_block = {"parent_id": parent.get('id') or token, "type": block_type,
+        parent_id = str(parent.get('id') or token)
+        new_block = {"parent_id": parent_id, "type": block_type,
                      "children": [], "comments": [], "revisions": [],
                      "author": self.auth.user_id,
                      # 新块只能空着建，正文用同一次请求里的 changeset 写（带文字会被判 schema mismatch）。
@@ -625,13 +651,13 @@ class SpaceClient:
                      "folded": False}
         ops = [{"p": [], "action": {"oi": new_block}}]
         if text:
-            ops.append(self._text_op(0, text, ''))
+            ops.append(self._text_op(0, text))
         response = self._post_block_op(token, {
             block_id: {"id": block_id, "version": 0, "payload": {"ops": ops}},
-            parent["id"]: {"id": parent["id"], "version": int(parent.get('version') or 1),
-                           "payload": {"ops": [
-                               {"p": ["children", index], "action": {"li": block_id}}]}}})
-        return {"block_id": block_id, "parent_id": parent.get('id') or token, "index": index,
+            parent_id: {"id": parent_id, "version": _version(parent),
+                        "payload": {"ops": [
+                            {"p": ["children", index], "action": {"li": block_id}}]}}})
+        return {"block_id": block_id, "parent_id": parent_id, "index": index,
                 "response": response}
 
     def set_block_type(self, url_or_token: str, block_id: str, block_type: str) -> dict:
@@ -646,7 +672,7 @@ class SpaceClient:
             raise SpaceError(f'文档里没有这个块: {block_id}')
         old_type = str((block.get('data') or {}).get('type') or 'text')
         op = {"p": ["type"], "action": {"od": old_type, "oi": block_type}}
-        return self._post_block_op(token, {block_id: {"id": block_id, "version": int(block.get('version') or 1),
+        return self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
                                                       "payload": {"ops": [op]}}})
 
     def delete_block(self, url_or_token: str, block_id: str) -> dict:
@@ -668,11 +694,15 @@ class SpaceClient:
         index = children.index(block_id)
         op = {"p": ["children", index], "action": {"ld": block_id}}
         return self._post_block_op(token, {parent_id: {"id": parent_id,
-                                                      "version": int(parent.get('version') or 1),
+                                                      "version": _version(parent),
                                                       "payload": {"ops": [op]}}})
 
     def delete_section(self, url_or_token: str, heading_block_id: str) -> list[dict]:
-        """删掉一个章节：标题块和它下面的正文块。返回每个被删块的响应。"""
+        """删掉一个章节：标题块和它下面的正文块。返回每次删除请求的响应。
+
+        整篇只读一次：父块被删时子块会跟着没，所以子孙块不再单独删（否则会报块不存在）；
+        同一个父块下的多个块合成一次请求，从后往前删，序号才不会错位。
+        """
         token, _, _ = self._doc_token(url_or_token)
         data = self.document_blocks(token)
         blocks = data.get('block_map') or {}
@@ -680,7 +710,10 @@ class SpaceClient:
         if heading_block_id not in order:
             raise SpaceError(f'文档里没有这个标题: {heading_block_id}')
         heading = blocks.get(heading_block_id) or {}
-        level = int(str((heading.get('data') or {}).get('type') or 'heading1')[7:] or 1)
+        heading_type = str((heading.get('data') or {}).get('type') or '')
+        if not heading_type.startswith('heading'):
+            raise SpaceError(f'这个块不是标题，删不了章节: {heading_block_id}')
+        level = int(heading_type[7:] or 1)
         victims = [heading_block_id]
         for block_id in order[order.index(heading_block_id) + 1:]:
             meta = blocks.get(block_id, {}).get('data') or {}
@@ -688,7 +721,24 @@ class SpaceClient:
             if kind.startswith('heading') and int(kind[7:] or 1) <= level:
                 break
             victims.append(block_id)
-        return [self.delete_block(token, block_id) for block_id in victims]
+        victims = [b for b in victims if not _has_ancestor_in(blocks, b, set(victims), token)]
+        by_parent: dict[str, list[str]] = {}
+        for block_id in victims:
+            parent_id = str((blocks.get(block_id, {}).get('data') or {}).get('parent_id') or '')
+            by_parent.setdefault(parent_id, []).append(block_id)
+        results = []
+        for parent_id, ids in by_parent.items():
+            parent = blocks.get(parent_id) or {}
+            children = list((parent.get('data') or {}).get('children') or [])
+            ops = []
+            for block_id in reversed(ids):
+                if block_id not in children:
+                    raise SpaceError(f'这个块不在父块的子块列表里: {block_id}')
+                ops.append({"p": ["children", children.index(block_id)], "action": {"ld": block_id}})
+            results.append(self._post_block_op(token, {
+                parent_id: {"id": parent_id, "version": _version(parent),
+                            "payload": {"ops": ops}}}))
+        return results
 
     def _post_block_op(self, token: str, change_map: dict) -> dict:
         return self._post('/space/api/docx/blocks/user_change',
@@ -723,11 +773,14 @@ class SpaceClient:
     def remove_member(self, token: str, owner_id: str, owner_type: int = 1,
                       obj_type: int = OBJ_TYPE_DOC) -> dict:
         """把协作者从文档上移除。owner_id 是飞书数字 id，owner_type：1=用户、2=群组。"""
-        return self._post('/space/api/suite/permission/members/delete/',
-                           data={'token': token, 'type': str(obj_type),
-                                 'owner_id': str(owner_id), 'owner_type': str(owner_type)},
-                           content_type='application/x-www-form-urlencoded',
-                           headers=self._csrf_headers())
+        result = self._post('/space/api/suite/permission/members/delete/',
+                             data={'token': token, 'type': str(obj_type),
+                                   'owner_id': str(owner_id), 'owner_type': str(owner_type)},
+                             content_type='application/x-www-form-urlencoded',
+                             headers=self._csrf_headers())
+        if not result.get('ret'):
+            raise SpaceError(f'移除协作者失败: {result}')
+        return result
 
     def update_title(self, url_or_token: str, title: str) -> dict:
         """改文档标题。"""
@@ -751,6 +804,8 @@ class SpaceClient:
         owner_type：1=用户、2=群组。只有文档所有者能加协作者。这里 notify_lark=0
         表示不通知对方，链接由调用方自己发出去。
         """
+        if not user_ids:
+            return {'success_count': 0}
         owners = [{'owner_id': user_id, 'owner_type': owner_type, 'permission': permission}
                   for user_id in user_ids]
         result = self._post('/space/api/suite/permission/members/create/',

@@ -38,6 +38,8 @@ class LarkClient:
         self.auth = auth
         # 复用连接，避免每次网关调用都重新握手 TLS。
         self._session = requests.Session()
+        # 云空间客户端也复用：它内部缓存 CSRF 令牌和 token 解析结果。
+        self._space = None
         self.auth.require_valid()
         if not self.auth.app_key or not self.auth.user_id:
             self.auth.validate(fetch_profile=True)
@@ -45,9 +47,11 @@ class LarkClient:
 
     @property
     def space(self) -> 'SpaceClient':
-        """同一份凭证下的云空间/云文档接口。"""
-        from .space import SpaceClient
-        return SpaceClient(self.auth)
+        """同一份凭证下的云空间/云文档接口（同一个实例，CSRF 令牌只取一次）。"""
+        if self._space is None:
+            from .space import SpaceClient
+            self._space = SpaceClient(self.auth)
+        return self._space
 
     def build_ws_url(self) -> str:
         device_id = self.auth.device_id

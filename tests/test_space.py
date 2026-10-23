@@ -467,13 +467,161 @@ def test_add_member_supports_groups(monkeypatch):
 
 
 def test_document_token_resolves_wiki_nodes(monkeypatch):
+    asked = []
+
     def fake_get(url, **kwargs):
         if 'wiki' in url:
-            return FakeResponse({"code": 0, "data": {"node": {"obj_token": "T1", "space_id": "S1"}}})
+            asked.append(kwargs.get("params", {}).get("wiki_token"))
+            if kwargs.get("params", {}).get("wiki_token") == "W1":
+                return FakeResponse({"code": 0, "data": {"node": {"obj_token": "T1", "space_id": "S1"}}})
+            return FakeResponse({"code": 404, "msg": "SourceNotExist"})
         return FakeResponse({"code": 0, "data": {}})
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     space = SpaceClient(auth_stub())
     assert space.document_token("https://x.feishu.cn/wiki/W1") == "T1"
     assert space.document_token("W1") == "T1"
-    assert space.document_token("doxcn1") == "doxcn1"
+    # 不是知识库节点的 token 原样返回，而且同一个 token 只问一次。
+    assert space.document_token("T2") == "T2"
+    assert space.document_token("T2") == "T2"
+    assert asked == ["W1", "W1", "T2"]
+
+
+def _doc_with_children(children):
+    """造一份只有一页的文档：{块 id: 块}。"""
+    blocks = {"doc1": {"id": "doc1", "version": 5, "data": {"type": "page", "children": list(children)}}}
+    for block_id in children:
+        blocks[block_id] = {"id": block_id, "version": 1,
+                            "data": {"type": "text", "parent_id": "doc1", "children": []}}
+    return blocks
+
+
+def test_delete_block_removes_it_from_the_parent(monkeypatch):
+    blocks = _doc_with_children(["b1", "b2", "b3"])
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {"block_map": blocks, "block_sequence": list(blocks)}})
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("json"))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).delete_block("doc1", "b2")
+
+    change = posts[0]["change_map"]["doc1"]
+    assert change["version"] == 5
+    assert change["payload"]["ops"] == [{"p": ["children", 1], "action": {"ld": "b2"}}]
+
+
+def test_delete_section_drops_nested_children_and_deletes_once(monkeypatch):
+    # h1 下面有 p1、bullet，bullet 下面还有子项：删 bullet 时子项跟着没，不能单独删。
+    blocks = {
+        "doc1": {"id": "doc1", "version": 5, "data": {"type": "page", "children": ["h1", "p1", "b1", "p2"]}},
+        "h1": {"id": "h1", "version": 1, "data": {"type": "heading1", "parent_id": "doc1", "children": []}},
+        "p1": {"id": "p1", "version": 1, "data": {"type": "text", "parent_id": "doc1", "children": []}},
+        "b1": {"id": "b1", "version": 1, "data": {"type": "bullet", "parent_id": "doc1", "children": ["c1"]}},
+        "c1": {"id": "c1", "version": 1, "data": {"type": "bullet", "parent_id": "b1", "children": []}},
+        "p2": {"id": "p2", "version": 1, "data": {"type": "text", "parent_id": "doc1", "children": []}},
+    }
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {"block_map": blocks, "block_sequence": list(blocks)}})
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("json"))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).delete_section("doc1", "h1")
+
+    # 一次请求，父块上的操作从后往前，标题和它下面所有正文一起删，bullet 的子项不单独删。
+    assert len(posts) == 1
+    ops = posts[0]["change_map"]["doc1"]["payload"]["ops"]
+    assert ops == [{"p": ["children", 3], "action": {"ld": "p2"}},
+                   {"p": ["children", 2], "action": {"ld": "b1"}},
+                   {"p": ["children", 1], "action": {"ld": "p1"}},
+                   {"p": ["children", 0], "action": {"ld": "h1"}}]
+
+
+def test_update_block_text_append_keeps_the_old_text(monkeypatch):
+    blocks = {"code": 0, "data": {"block_map": {"b1": {
+        "id": "b1", "version": 3,
+        "data": {"type": "text", "text": {"initialAttributedTexts": {"text": {"0": "old"}}}}}}}}
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse(blocks)
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("json"))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).update_block_text("doc1", "b1", "ZZZ", append=True)
+
+    change = posts[0]["change_map"]["b1"]
+    # 保留 3 个旧字再插 3 个：长度差 +3，旧字一个不动。
+    assert change["payload"]["ops"][0]["subType"]["o"]["zone_changesets"]["0"] == "Z:3>3=3*0+3$ZZZ"
+
+
+def test_delete_section_refuses_a_non_heading_block(monkeypatch):
+    blocks = _doc_with_children(["p1", "p2"])
+    monkeypatch.setattr("larkx.space.requests.get",
+                        lambda url, **kwargs: FakeResponse({"code": 0, "data": {
+                            "block_map": blocks, "block_sequence": list(blocks)}}))
+    with pytest.raises(SpaceError, match="不是标题"):
+        SpaceClient(auth_stub()).delete_section("doc1", "p1")
+
+
+def test_document_outline_lists_every_editable_block(monkeypatch):
+    blocks = {
+        "doc1": {"id": "doc1", "version": 1, "data": {"type": "page", "children": ["h1", "p1", "b1"]}},
+        "h1": {"id": "h1", "version": 1, "data": {"type": "heading1", "parent_id": "doc1", "children": []}},
+        "p1": {"id": "p1", "version": 1, "data": {"type": "text", "parent_id": "doc1", "children": []}},
+        "b1": {"id": "b1", "version": 1, "data": {"type": "bullet", "parent_id": "doc1", "children": []}},
+    }
+    monkeypatch.setattr("larkx.space.requests.get",
+                        lambda url, **kwargs: FakeResponse({"code": 0, "data": {
+                            "block_map": blocks, "block_sequence": list(blocks)}}))
+    outline = SpaceClient(auth_stub()).document_outline("doc1")
+    # 列表项也是能改文字的块，得能在 outline 里看到。
+    assert [(b["id"], b["type"]) for b in outline["sections"][0]["blocks"]] == [("p1", "text"), ("b1", "bullet")]
+
+
+def test_insert_block_clamps_the_index_and_keeps_the_parent(monkeypatch):
+    blocks = _doc_with_children(["p1", "p2"])
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse({"code": 0, "data": {"block_map": blocks, "block_sequence": list(blocks)}})
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("json"))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    space = SpaceClient(auth_stub())
+    # 序号超出范围时插到末尾。
+    assert space.insert_block("doc1", "x", index=99)["index"] == 2
+    # 指定父块时插到那个父块下面。
+    assert space.insert_block("doc1", "x", parent_id="p1")["parent_id"] == "p1"
+    assert posts[1]["change_map"]["p1"]["payload"]["ops"][0]["p"] == ["children", 0]
+
+
+def test_unknown_block_raises(monkeypatch):
+    blocks = _doc_with_children(["p1"])
+    monkeypatch.setattr("larkx.space.requests.get",
+                        lambda url, **kwargs: FakeResponse({"code": 0, "data": {
+                            "block_map": blocks, "block_sequence": list(blocks)}}))
+    space = SpaceClient(auth_stub())
+    with pytest.raises(SpaceError, match="文档里没有这个块"):
+        space.set_block_type("doc1", "nope", "bullet")
+    with pytest.raises(SpaceError, match="文档里没有这个块"):
+        space.delete_block("doc1", "nope")
