@@ -148,6 +148,11 @@ def _elements():
     return _LARK_ALL
 
 
+def _placeholder(kind: str, name: str = "") -> str:
+    """非文字内容的占位文本：只留类型和名字。"""
+    return f"[{kind}:{name}]" if name else f"[{kind}]"
+
+
 def decode_message_content(message_type, content_bytes):
     try:
         if message_type == 4:
@@ -163,7 +168,7 @@ def decode_message_content(message_type, content_bytes):
             d = protobuf_to_dict(pc)
             title = d.get('title', '')
             text = extract_rich_text(d.get('richText', {})) or d.get('text', '')
-            return (f'[富文本] {title}\n{text}'.strip(), d)
+            return ((f"{title}\n{text}" if title else text).strip(), d)
         if message_type == 5:
             ic = P.ImageContent()
             ic.ParseFromString(content_bytes)
@@ -178,65 +183,49 @@ def decode_message_content(message_type, content_bytes):
                         width, height = (size.get('width', '?'), size.get('height', '?'))
                         break
                 has_crypto = 'crypto' in v2
-                return (f"[图片] imageKey={key} ({width}x{height}){(' 已加密' if has_crypto else '')}", d)
+                return ("[图片]", d)
             img = (d.get('image') or {}).get('origin') or {}
             key = img.get('key') or (d.get('image') or {}).get('key') or (d.get('image') or {}).get('imageKey', '')
-            return (f"[图片] imageKey={key} ({img.get('width', '?')}x{img.get('height', '?')})", d)
+            return ("[图片]", d)
         if message_type == 3:
             fc = P.FileContent()
             fc.ParseFromString(content_bytes)
             d = protobuf_to_dict(fc)
-            return (f"[文件] {d.get('name', '')} ({d.get('mime', '')}, {d.get('size', 0)}字节, key={d.get('key', '')})", d)
+            return (_placeholder("文件", d.get('name', '')), d)
         if message_type == 15:
             mc = P.MediaContent()
             mc.ParseFromString(content_bytes)
             d = protobuf_to_dict(mc)
-            return (f"[视频] {d.get('name', '')} (时长{d.get('duration', 0) / 1000:.1f}s, {d.get('size', 0)}字节, key={d.get('key', '')})", d)
+            return (_placeholder("视频", d.get('name', '')), d)
         if message_type == 7:
             ac = P.AudioContent()
             ac.ParseFromString(content_bytes)
             d = protobuf_to_dict(ac)
-            return (f"[语音] 时长{d.get('duration', 0) / 1000:.1f}s, key={d.get('key', '')}", d)
+            return ("[语音]", d)
         if message_type == 10:
             sc = P.StickerContent()
             sc.ParseFromString(content_bytes)
             d = protobuf_to_dict(sc)
-            return (f"[表情包] stickerId={d.get('stickerId', '')} key={d.get('key', '')}", d)
+            return ("[表情]", d)
         if message_type == 14:
             cc = P.CardContent()
             cc.ParseFromString(content_bytes)
             d = protobuf_to_dict(cc)
             header = d.get('cardHeader') or {}
             title = header.get('title') or header.get('mainTitle') or ''
-            json_card = d.get('jsonCard', '')
-            parts = ['[卡片]']
-            if title:
-                parts.append(title)
-            if d.get('cardDesc'):
-                parts.append(f"({d['cardDesc']})")
-            if json_card:
-                parts.append(json_card[:2000])
-            elif d.get('openCardContent'):
-                parts.append(f"<openCardContent {len(d['openCardContent'])}字节>")
-            return (' '.join(parts), d)
+            return (_placeholder("卡片", title), d)
         if message_type == 11:
             mfc = P.MergeForwardContent()
             mfc.ParseFromString(content_bytes)
             d = protobuf_to_dict(mfc)
-            msgs = d.get('messages', [])
             name = d.get('groupChatName') or f"{d.get('p2pCreatorName', '')}与{d.get('p2pPartnerName', '')}的会话"
-            lines = [f'[合并转发] {name} 共{len(msgs)}条:']
-            for m in msgs[:20]:
-                sub_type = enum_to_int(m.get('type', 0))
-                sub_summary, _ = decode_message_content(sub_type, m.get('content', b''))
-                lines.append(f"  {m.get('fromId', '')}: {sub_summary}")
-            return ('\n'.join(lines), d)
+            return (_placeholder("合并转发", name), d)
         if message_type == 20:
             lc = P.LocationContent()
             lc.ParseFromString(content_bytes)
             d = protobuf_to_dict(lc)
             desc = d.get('locationDescription') or {}
-            return (f"[位置] {desc.get('name', '')} {desc.get('description', '')} ({d.get('latitude', '')},{d.get('longitude', '')})", d)
+            return (_placeholder("位置", desc.get('name', '')), d)
         if message_type == 6:
             sc = P.SystemContent()
             sc.ParseFromString(content_bytes)
@@ -246,12 +235,12 @@ def decode_message_content(message_type, content_bytes):
                 for item in (cv or {}).get('items', []):
                     if item.get('text'):
                         texts.append(item['text'])
-            return (f"[系统消息] type={d.get('typeNum') or d.get('type', '')} {' '.join(texts)}", d)
+            return (f"[系统消息] {' '.join(texts)}", d)
         if message_type == 23:
             sc = P.ShareUserCardContent()
             sc.ParseFromString(content_bytes)
             d = protobuf_to_dict(sc)
-            return (f"[名片] {d.get('name', '')} (userId={d.get('userId', '')})", d)
+            return (_placeholder("名片", d.get('name', '')), d)
         if message_type == 9:
             sc = P.ShareGroupChatContent()
             sc.ParseFromString(content_bytes)
@@ -259,33 +248,33 @@ def decode_message_content(message_type, content_bytes):
             chat = d.get('chat') or {}
             chat_name = chat.get('name', '')
             chat_id = d.get('chatId') or chat.get('id', '')
-            return (f'[群分享] {chat_name} (chatId={chat_id})', d)
+            return (_placeholder("群分享", chat_name), d)
         if message_type == 16:
             sc = P.ShareCalendarEventContent()
             sc.ParseFromString(content_bytes)
             d = protobuf_to_dict(sc)
-            return (f"[分享日程] 参与人数={d.get('attendeesCount', '?')}", d)
+            return ("[日程]", d)
         if message_type == 17:
             hc = P.HongbaoContent()
             hc.ParseFromString(content_bytes)
             d = protobuf_to_dict(hc)
-            return (f"[红包] {d.get('subject', '')}", d)
+            return (_placeholder("红包", d.get('subject', '')), d)
         if message_type == 12:
             cc = P.CalendarContent()
             cc.ParseFromString(content_bytes)
             d = protobuf_to_dict(cc)
-            return (f"[日历] {d.get('calendar', '')}", d)
+            return ("[日历]", d)
         if message_type == 19:
             vc = P.VideoChatContent()
             vc.ParseFromString(content_bytes)
             d = protobuf_to_dict(vc)
             topic = (d.get('meetingCard') or {}).get('topic', '')
-            return (f'[视频会议] {topic}', d)
+            return (_placeholder("视频会议", topic), d)
         if message_type == 8:
             ec = P.EmailContent()
             ec.ParseFromString(content_bytes)
             d = protobuf_to_dict(ec)
-            return (f"[邮件] {d.get('title', '')} {d.get('text', '')}", d)
+            return (_placeholder("邮件", d.get('title', '')), d)
     except Exception as e:
         return (f'[{MSG_TYPE_NAMES.get(message_type, message_type)}消息解析失败: {e}]', None)
     return (f'[{MSG_TYPE_NAMES.get(message_type, message_type)}类型消息]', None)
