@@ -719,8 +719,8 @@ def test_message_attachments_normalizes_resource_kinds():
         {"key": "file_v3_2", "name": "a.mp4", "size": 8}]
     assert message_attachments(7, {"key": "file_v3_3", "duration": 3000}) == [
         {"key": "file_v3_3", "name": "", "size": 0}]
-    assert message_attachments(5, {"imageV2": {"imageKey": "img_v3_1", "variants": [
+    assert message_attachments(5, {"originSize": 180, "imageV2": {"imageKey": "img_v3_1", "variants": [
         {"type": 1, "size": {"width": 20, "height": 10}}]}}) == [
-        {"key": "img_v3_1", "name": "", "size": 0}]
+        {"key": "img_v3_1", "name": "", "size": 180}]
     # 位置/名片这类没有资源，不进附件
     assert message_attachments(20, {"name": "公司", "latitude": "39.9"}) == []

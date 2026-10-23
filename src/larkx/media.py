@@ -158,7 +158,7 @@ def message_attachments(message_type: int, content: dict) -> list[dict]:
     """
     content = content or {}
     if message_type == 5:
-        return [{"key": item["key"], "name": "", "size": 0}
+        return [{"key": item["key"], "name": "", "size": int(content.get("originSize") or 0)}
                 for item in image_resources(content) if item.get("key")]
     if message_type in (3, 13, 15, 7):
         return [{"key": content.get("key", ""), "name": content.get("name", ""),
