@@ -221,13 +221,20 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
 
 **图文混排**（一条消息里既有文字又有图片）：用 type=4 的普通文字消息，`richText` 里放一个 tag=2(IMG) 的元素，元素的 `property` 是 `entities.ImImage{imageKey, fsUnit, crypto}`，并把元素 id 放进 `richText.imageIds`；实测发出去、收回来是"看图 [图片]"一条消息。
 
-## 图片：key、密文和解密
+## 消息资源：上传、key、下载
 
 - **上传图片**：`POST {file_host}/api/image`（multipart）→ 返回图片 key `img_v3_…`（`media.upload_image`）。
-- **消息里的图片**：`ImageContent`（消息类型 5）里是 `imageV2`：`imageKey`（就是那个 key）、`fsUnit`（如 `eu_nc-cdn`）、`crypto`（AES-256-GCM 的 `cipher.key`(32B)/`cipher.iv`(12B)/`cipher.extra`）、`variants`（各档尺寸）、`thumbnailInline`（消息里内联的 webp 缩略图，**明文**）。旧格式是 `image.imageKey` + `image.origin`。
-- **取图片字节**：`GET {file_host}/static-resource/image/{image_key}` → 拿到的是**密文**（比原图多 16 字节 GCM tag），要用消息里的 `crypto` 解密（AES-256-GCM，aad 为空）才是原图。
-- **别走 IM 网关取图**：网关有 `media.v1.GetResourceWithFsUnit`(1153)、`MGetResourcesWithFsUnit`(1154)、`DownloadFile`(1033)、`DownloadFiles`(1151) 这些命令，但本租户的 appid 大多报 `command: N not found`；网页端实际走的是文件服务那条 HTTP 路径。
-- LarkX 的封装：`media.image_resources(content)` 取图片资源、`media.open_image(auth, key)` 开上游响应、`media.decrypt_image(blob, crypto)` 解密。
+- **上传文件**：`POST {file_host}/api/chats/{chat_id}/files`（multipart）→ `{key, name, size, mimetype}`（`media.upload_file`），文件归属于会话。
+- **消息里的资源**：图片在 `ImageContent`（类型 5）的 `imageV2` 里（`imageKey`、`fsUnit`、`crypto`、`variants`、`thumbnailInline`）；文件/视频/语音分别是 `FileContent`(3/13)、`MediaContent`(15)、`AudioContent`(7)，里面是 `key`（`file_v3_…`）、`name`、`size`、`fsUnit`，视频还有 `duration`。
+- **取回字节（唯一能用的下载口）**：`GET {file_host}/download/messages/{message_id}/keys/{key}`（带登录 cookie）→ **明文**，图片/文件/视频/语音通用。封装是 `media.download_message_resource(auth, key, message_id)`，返回 `(字节, content-type)`。
+  - 图片的 key 绑在消息上，`message_id` 必须对得上；文件/视频/语音只认 key，`message_id` 随便传。
+  - 响应带 `Content-Disposition: attachment; filename="xxx"`，但 `Content-Type` 对视频也是默认的 `text/plain`，所以按文件名重猜（`mimetypes`）。
+  - key 不存在时上游回 400 `invalid token`，封装里抛 `KeyError`。
+- **走不通的下载路**（别再试）：
+  - `GET {file_host}/static-resource/file/{key}` 和 `/static-resource/image/{key}` 返回的是**密文**（比明文多 16 字节 GCM tag）。图片的密钥在消息的 `crypto` 里能解开，但文件/视频/语音的消息内容里**没有密钥**，这条路对它们是死的。
+  - IM 网关的 `media.v1.*`（`DownloadFile` 1033、`DownloadFiles` 1151、`DownloadResource` 1044、`GetResourcePath` 1168、`GetResourceUrls` 3163、`DecryptFile` 1155…）在本租户 appid 报 `command: N not found`；就算用 `cmd` 直连网关也拼不出 payload——这些 proto 的定义在网页端的 Rust/WASM SDK 里，前端 JS chunk 只有「命令号↔消息名」对照表，猜字段一律返回 `code 100053 call server api unknown error`。
+  - 网页端自己下载走的是 `LarkAPI.transport.callServerApi`（WASM 内部编码），浏览器里能调，但服务端对文件下载这套命令直接拒绝，网页端最终也是落到上面那个文件服务 HTTP 口。
+- 参考：TS 版同源项目 <https://github.com/fnfun/lark-agent-x-ts> 的 `src/media.ts` 用的是同一个下载 URL，可以对照。
 
 ## 不要留没人用的封装
 
