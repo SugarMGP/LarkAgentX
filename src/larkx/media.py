@@ -92,20 +92,22 @@ def image_keys(content: dict) -> list[str]:
     return [str(key)] if key else []
 
 
-def download_message_resource(auth: LarkAuth, key: str, message_id: str = '') -> tuple[bytes, str]:
-    """按资源 key 取回消息里的原始字节（图片/文件/视频/语音通用，服务端返回明文）。
+def open_message_resource(auth: LarkAuth, key: str, message_id: str = '') -> tuple[requests.Response, str]:
+    """打开消息里的资源（图片/文件/视频/语音通用），返回 (上游响应, content-type)。
 
-    图片的 key 绑在消息上，要带上那条消息的 message_id；文件/视频/语音只认 key。
-    返回 (字节, content-type)：飞书对视频也回 text/plain，这里按文件名重猜一次。
+    上游响应是流式的，调用方负责 close；key 不存在时上游回 400，这里抛 KeyError。
+    content-type 按上游 Content-Disposition 里的文件名判断（飞书对视频也给 text/plain）。
     """
     url = f'{auth.region.file_host}/download/messages/{message_id}/keys/{key}'
-    resp = requests.get(url, cookies=auth.cookies, headers=_web_headers(auth), timeout=60)
-    if resp.status_code == 400:
-        raise KeyError(f'飞书不认这个资源 key: {key}')
-    resp.raise_for_status()
+    resp = requests.get(url, cookies=auth.cookies, headers=_web_headers(auth), timeout=60, stream=True)
+    if resp.status_code >= 400:
+        resp.close()
+        if resp.status_code == 400:
+            raise KeyError(f'飞书不认这个资源 key: {key}')
+        resp.raise_for_status()
     name = _attachment_name(resp.headers.get('content-disposition', ''))
     content_type = mimetypes.guess_type(name)[0] or resp.headers.get('content-type') or 'application/octet-stream'
-    return resp.content, content_type
+    return resp, content_type
 
 
 def _attachment_name(disposition: str) -> str:

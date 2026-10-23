@@ -87,12 +87,16 @@ class FakeResponse:
         self.content = content
         self.headers = headers or {}
         self.status_code = status_code
+        self.closed = False
 
     def raise_for_status(self):
         return None
 
     def json(self):
         return self._body
+
+    def close(self):
+        self.closed = True
 
 
 def auth_stub():
@@ -173,31 +177,33 @@ def test_download_only_sends_cookies_to_the_same_region(monkeypatch):
     assert seen["cookies"] == {}
 
 
-def test_download_message_resource_returns_plain_bytes(monkeypatch):
+def test_open_message_resource_streams_and_guesses_type(monkeypatch):
     captured = {}
 
     def fake_get(url, **kwargs):
         captured["url"] = url
-        return FakeResponse(content=b"hello file", headers={
+        captured["stream"] = kwargs.get("stream")
+        return FakeResponse(headers={
             "content-type": "text/plain; charset=utf-8",
             "content-disposition": 'attachment; filename="note.txt"'})
 
     monkeypatch.setattr(media.requests, "get", fake_get)
-    blob, content_type = media.download_message_resource(auth_stub(), "file_v3_1", "m1")
-    assert blob == b"hello file"
+    response, content_type = media.open_message_resource(auth_stub(), "file_v3_1", "m1")
     assert content_type == "text/plain"
     assert captured["url"] == "https://file.example/download/messages/m1/keys/file_v3_1"
+    assert captured["stream"] is True
 
 
-def test_download_message_resource_guesses_type_from_name(monkeypatch):
+def test_open_message_resource_guesses_type_from_name(monkeypatch):
     monkeypatch.setattr(media.requests, "get", lambda url, **kwargs: FakeResponse(
-        content=b"\x00\x00\x00 ftyp", headers={"content-type": "text/plain",
-                                                 "content-disposition": 'attachment; filename="clip.mp4"'}))
-    _, content_type = media.download_message_resource(auth_stub(), "file_v3_2", "m2")
+        headers={"content-type": "text/plain", "content-disposition": 'attachment; filename="clip.mp4"'}))
+    _, content_type = media.open_message_resource(auth_stub(), "file_v3_2", "m2")
     assert content_type == "video/mp4"
 
 
-def test_download_message_resource_reports_unknown_key(monkeypatch):
-    monkeypatch.setattr(media.requests, "get", lambda url, **kwargs: FakeResponse(status_code=400))
+def test_open_message_resource_reports_unknown_key(monkeypatch):
+    fake = FakeResponse(status_code=400)
+    monkeypatch.setattr(media.requests, "get", lambda url, **kwargs: fake)
     with pytest.raises(KeyError, match="资源 key"):
-        media.download_message_resource(auth_stub(), "file_v3_bad", "m3")
+        media.open_message_resource(auth_stub(), "file_v3_bad", "m3")
+    assert fake.closed
