@@ -53,10 +53,9 @@ class SpaceError(RuntimeError):
     """云空间/文档接口返回了业务错误。"""
 
 
-def _check_block_type(block_type: str) -> str:
+def _check_block_type(block_type: str) -> None:
     if block_type not in BLOCK_TYPES:
         raise SpaceError(f'不支持的块类型: {block_type}')
-    return block_type
 
 
 def _unwrap(path: str, body: dict) -> dict:

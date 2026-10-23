@@ -148,8 +148,16 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
 **块树操作**（改块结构，走同一个 user_change 接口）：
 
 - 删一个子块：change_map 的 key 是**父块 id**，`ops` 是 `{"p":["children",序号],"action":{"ld":"<子块 id>"}}`。
-- 新建块：应该也是 `{"p":["children",序号],"action":{...}}`，但"插入对象"的参数格式没逆出来（试过 oi/li + 完整块 JSON，服务端都拒）。headless 里回车建段不生效，抓不到真实样本。
-- 所以目前只能**改文字、删块**，不能新增块。
+- **新建块**：change_map 带**两条**——新块自己（`version:0`，`ops` 是 `{"p":[],"action":{"oi":<整块数据>}}`）和它的父块（`{"p":["children",序号],"action":{"li":"<新块 id>"}}`）。`oi` 的字段：
+  `{"parent_id":<父块 id>,"type":"text","children":[],"comments":[],"revisions":[],"author":<我的 user id>,"text":{"initialAttributedTexts":{"text":{"0":""},"attribs":{"0":""}},"apool":{"numToAttrib":{},"nextNum":0}},"folded":false}`
+  序号 `["children", N]` 是插入位置（0 基，插在第 N 个子块之前）。**新块必须空着建**，`oi` 里带正文会被服务端拒（`schema mismatch`）；正文用同一次请求里的第二条 op 写（`{"p":["text"],"subType":{...}}`，changeset 用 `Z:0>N*0+N$正文`）。
+- **换块类型**：在块上发一条 `{"p":["type"],"action":{"od":<旧类型>,"oi":<新类型>}}` 即可，version 用块的当前版本。
+- 块类型取值：`page`、`heading1`~`heading9`、`text`、`bullet`、`ordered`、`todo`、`quote`、`code`、`divider`、`table`、`image`。`ordered` 不带 `seq` 也能正常显示编号（前端按位置算），`todo` 不带 `done` 默认未完成。
+
+- **局部样式**（选中一段加粗）：还是 `{"p":["text"],"subType":{...}}`，changeset 用 `*<属性号>=<字数>` 而不是 `*<属性号>+<字数>`，例如给 10 个字的块里第 6~10 个字加粗是 `Z:a>0*0=5$`，`$` 后面没有新文字，属性定义放在同一条 op 的 `apool.numToAttrib` 里（`{"0":["bold","true"]}`）。属性名至少有 `bold`、`italic`、`link`、`color`、`background` 等，读取侧 `_decode_line` 已经能解析。
+- **块移动/排序**：没抓到。网页端拖拽块、`Cmd+Shift+↑/↓` 都没产生 user_change（LarkX 里删块+插入块可以拼出同样的效果，先删后插）。
+
+抓这些 op 的办法（headless 里 `Input.dispatchKeyEvent` 不生效，必须 headful）：`/Applications/Google Chrome.app/... --remote-debugging-port=9336 --user-data-dir=/tmp/x`，CDP 连上后先 `Network.setCookie` 注入 cookie、导航到文档，**用 `Input.dispatchMouseEvent` 真点**进某个块（`Input.insertText` 会改 DOM 但光标键不响应，`Home`/方向键在未真点聚焦时是空操作），再用 `Input.dispatchKeyEvent` 发回车/字符。注意 CDP 客户端要用单个 reader 任务分发消息，`call()` 里顺手 `recv()` 会把 `Network.requestWillBeSent` 事件吞掉。
 
 ## 不要留没人用的封装
 
