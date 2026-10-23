@@ -712,7 +712,8 @@ def test_decrypt_image_returns_plain_bytes():
 def test_message_attachments_normalizes_resource_kinds():
     from larkx.media import message_attachments
     assert message_attachments(4, {"richText": {}}) == []
-    assert message_attachments(3, {"key": "file_v3_1", "name": "a.txt", "size": 12, "mime": "text/plain"}) == [
+    # 文件、视频、语音都当文件
+    assert message_attachments(3, {"key": "file_v3_1", "name": "a.txt", "size": 12}) == [
         {"key": "file_v3_1", "name": "a.txt", "size": 12}]
     assert message_attachments(15, {"key": "file_v3_2", "name": "a.mp4", "size": 8, "duration": 2000}) == [
         {"key": "file_v3_2", "name": "a.mp4", "size": 8}]

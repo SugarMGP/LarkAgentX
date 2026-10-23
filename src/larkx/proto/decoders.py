@@ -196,12 +196,12 @@ def decode_message_content(message_type, content_bytes):
             mc = P.MediaContent()
             mc.ParseFromString(content_bytes)
             d = protobuf_to_dict(mc)
-            return (_placeholder("视频", d.get('name', '')), d)
+            return (_placeholder("文件", d.get('name', '')), d)
         if message_type == 7:
             ac = P.AudioContent()
             ac.ParseFromString(content_bytes)
             d = protobuf_to_dict(ac)
-            return ("[语音]", d)
+            return (_placeholder("文件", d.get('name', '')), d)
         if message_type == 10:
             sc = P.StickerContent()
             sc.ParseFromString(content_bytes)
