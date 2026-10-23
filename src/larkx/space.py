@@ -251,6 +251,17 @@ def _block_text(block: dict) -> str:
     return _render_inline(_decode_text((block.get("data") or {}).get("text") or {}))
 
 
+def _raw_text(block: dict) -> str:
+    """块的原始正文（不带 markdown 标记）：服务端 zone 的长度按它算。"""
+    texts = (((block.get("data") or {}).get("text") or {}).get("initialAttributedTexts") or {}).get("text") or {}
+    return "".join(texts[key] for key in sorted(texts, key=lambda k: int(k) if str(k).isdigit() else 0))
+
+
+def _ulen(text: str) -> int:
+    """长度按 UTF-16 code unit 算：飞书服务端是 JS 字符串，emoji 占两个。"""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _blocks_to_markdown(block_map: dict, sequence: list[str]) -> str:
     """把块渲染成 markdown。返回的每一项是一个「块组」，组内用换行、组间用空行。"""
     def children(bid: str) -> list[str]:
@@ -625,16 +636,21 @@ class SpaceClient:
         # 正文流是页面的顶层子块；嵌套的子块挂在各自的父块下，不在顶层再出现一次。
         page = blocks.get(token) or {}
         roots = [b for b in ((page.get('data') or {}).get('children') or []) if b in blocks]
+        title = _block_text(page)
         for block_id in roots or order:
             meta = blocks[block_id].get('data') or {}
             kind = str(meta.get('type') or '')
             text = _block_text(blocks[block_id])
             if kind == 'page':
-                title = text
-            elif kind.startswith('heading'):
+                continue
+            if kind.startswith('heading'):
                 current = {"id": block_id, "level": int(kind[7:] or 1), "title": text, "blocks": []}
                 sections.append(current)
-            elif kind in _EDITABLE_BLOCKS and current is not None:
+            elif kind in _EDITABLE_BLOCKS:
+                if current is None:
+                    # 第一个标题之前的块也得有归属，否则整篇都拿不到 block id。
+                    current = {"id": token, "level": 1, "title": "", "blocks": []}
+                    sections.append(current)
                 current["blocks"].append({"id": block_id, "type": kind, "text": text,
                                          "children": subtree(block_id)})
         return {"token": token, "title": title, "sections": sections}
@@ -650,10 +666,11 @@ class SpaceClient:
         block = self.document_blocks(token).get('block_map', {}).get(block_id)
         if block is None:
             raise SpaceError(f'文档里没有这个块: {block_id}')
-        old = _block_text(block)
+        old = _raw_text(block)
+        old_len = _ulen(old)
         response = self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
                                                           "payload": {"ops": [
-                                                              self._text_op(len(old), text, keep=len(old) if append else 0,
+                                                              self._text_op(old_len, text, keep=old_len if append else 0,
                                                                             drop=not append)]}}})
         return {"block_id": block_id, "version": _ack_version(response, block_id)}
 
@@ -663,7 +680,7 @@ class SpaceClient:
         keep 是原文中保留的字数，drop 表示把剩下的旧字全删掉；长度差按"改完之后的
         正文总长减旧长度"算。
         """
-        length = len(text)
+        length = _ulen(text)
         delta = keep + length - old_len
         diff = f">{_b36(delta)}" if delta >= 0 else f"<{_b36(-delta)}"
         ops = (f"={_b36(keep)}" if keep or drop else "") + (f"-{_b36(old_len - keep)}" if drop else "")
@@ -675,16 +692,19 @@ class SpaceClient:
 
     def insert_block(self, url_or_token: str, text: str = '', *, block_type: str = 'text',
                      parent_id: str = '', index: int | None = None, after: str = '') -> dict:
-        """插入一个新块，返回 {"block_id", "parent_id", "index"}。
+        """插入一个新块，返回 {"block_id", "parent_id", "index", "version"}。
 
         协议：一次 user_change 带两条 change_map —— 新块自己（version 0，一条
         ``{"p": [], "action": {"oi": 块数据}}``）和它的父块
         （``{"p": ["children", 序号], "action": {"li": 新块 id}}``）。
 
-        block_type 取 BLOCK_TYPES 里的值。位置三选一：after 某个块（插在它后面）、
-        给 index、都不给就追加到父块末尾；parent_id 不给就是文档本身（顶层块）。
+        block_type 取 BLOCK_TYPES 里的值。位置三选一：after 某个块（插在它后面，同级）、
+        parent_id 某个块（插在它下面，当子块）、都不给就追加到文档末尾。
+        after 和 parent_id 只能给一个；给了 parent_id 就是插到那个父块的子块末尾。
         """
         _check_block_type(block_type)
+        if after and parent_id:
+            raise SpaceError('after 和 parent_id 只能给一个')
         token, _, _ = self._doc_token(url_or_token)
         blocks = self.document_blocks(token).get('block_map') or {}
         if after:
@@ -730,6 +750,8 @@ class SpaceClient:
         if block is None:
             raise SpaceError(f'文档里没有这个块: {block_id}')
         old_type = str((block.get('data') or {}).get('type') or 'text')
+        if block_type == 'divider' and (block.get('data') or {}).get('children'):
+            raise SpaceError('这个块下面还有子块，换成分割线会把子块一起删掉')
         op = {"p": ["type"], "action": {"od": old_type, "oi": block_type}}
         response = self._post_block_op(token, {block_id: {"id": block_id, "version": _version(block),
                                                           "payload": {"ops": [op]}}})
@@ -881,9 +903,13 @@ class SpaceClient:
     def delete_document(self, url_or_token: str, obj_type: int = OBJ_TYPE_DOC) -> dict:
         """删掉一篇文档（进回收站）。只有文档所有者能删。"""
         token, _, _ = self._doc_token(url_or_token)
-        return self._post('/space/api/explorer/obj/delete/',
-                           params={'obj_token': token, 'obj_type': str(obj_type)},
-                           headers=self._csrf_headers())
+        result = self._post('/space/api/explorer/obj/delete/',
+                            params={'obj_token': token, 'obj_type': str(obj_type)},
+                            headers=self._csrf_headers())
+        deleted = list(result.get('success_obj_token') or []) + list(result.get('success_token') or [])
+        if token not in deleted:
+            raise SpaceError(f'删除文档失败: {result}')
+        return result
 
     def update_title(self, url_or_token: str, title: str) -> dict:
         """改文档标题，返回 {"token", "title"}。"""

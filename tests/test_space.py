@@ -662,3 +662,11 @@ def test_wiki_path_walks_up_the_parent_nodes(monkeypatch):
 
     monkeypatch.setattr("larkx.space.requests.get", fake_get)
     assert SpaceClient(auth_stub()).wiki_path("W3") == ["知识库", "项目", "周报"]
+
+
+def test_insert_block_refuses_two_anchors(monkeypatch):
+    monkeypatch.setattr("larkx.space.requests.get",
+                        lambda url, **kwargs: FakeResponse({"code": 0, "data": {
+                            "block_map": _doc_with_children(["p1"]), "block_sequence": ["p1"]}}))
+    with pytest.raises(SpaceError, match="只能给一个"):
+        SpaceClient(auth_stub()).insert_block("doc1", "x", after="p1", parent_id="p1")
