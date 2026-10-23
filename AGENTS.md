@@ -89,6 +89,22 @@ IM 网关：
 - **没逆出来的**：真正写链接可见范围的接口（`suite/permission/public/update/` 存在但参数不对，网页端那步的请求没抓到），所以 LarkX 只读不写可见范围。
 - 协作者候选人在网页端是走 IM 网关搜的（`SEARCH_DOC_WEB`），`space.search_user()` 走的是云空间的 `search/permission_candidates/`，两个都能搜到人。
 
+## 文档接口的返回约定
+
+`SpaceClient` 的文档接口**统一返回整理过的稳定字段**，不把飞书原始响应透传给调用方：
+
+| 方法 | 返回 |
+|---|---|
+| `document_meta` | `{token, title, type, url, owner{id,name}, creator{id,name}, last_editor{name}, create_time, update_time}` |
+| `document_path` | `{path: ["我的空间", "周报"]}`（wiki 里的文档是空数组） |
+| `document_members` | `{total, members: [{id, name, kind(user/group), is_owner, permission(read/edit)}]}` |
+| `document_outline` | `{token, title, sections: [{id, level, title, blocks: [{id, type, text}]}]}` |
+| `update_block_text` / `set_block_type` / `delete_block` / `insert_block` | `{block_id, version, ...}`，version 是改完后的块版本号 |
+| `delete_section` | `{blocks: [被删的块 id]}` |
+| `add_member` / `remove_member` / `update_title` | `{success_count, fail_owners}` / `{removed}` / `{token, title}` |
+
+要原始结构就用 `document_blocks`（块树本身就是协议结构）。上游字段名（`owner_user_name`、`permissions` 这种）只出现在 LarkX 内部，别泄漏到调用方。
+
 加协作者的细节（`SpaceClient.add_member`）：
 
 - 表单编码，`owners` 是 JSON 数组 `[{"owner_id": "<飞书数字 user id>", "owner_type": 1, "permission": 4}]`
