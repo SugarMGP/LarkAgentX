@@ -22,7 +22,9 @@
 from __future__ import annotations
 
 import json
+import random
 import re
+import string
 import time
 import uuid
 import zlib
@@ -37,6 +39,10 @@ _URL_RE = re.compile(r"^(https?:|mailto:|tel:|/)", re.I)
 _CSS_COLOR_RE = re.compile(r"^(#[0-9a-f]{3,8}|rgba?\(|hsla?\()", re.I)
 _LISTS = ("bullet", "ordered", "todo")
 _HEADINGS = {"heading1": 1, "heading2": 2, "heading3": 3, "heading4": 4, "heading5": 5, "heading6": 6}
+# 可插入/可切换的块类型：正文、1~9 级标题、列表、待办、引用、代码块、分割线
+BLOCK_TYPES = frozenset({"text", "bullet", "ordered", "todo", "quote", "code", "divider"}
+                        | {f"heading{level}" for level in range(1, 10)})
+_BLOCK_ID_ALPHABET = string.ascii_letters + string.digits
 # 协作者权限位（飞书位掩码）：可阅读 1、可评论 2、可编辑 4
 PERM_READABLE = 1
 PERM_COMMENTABLE = 2
@@ -45,6 +51,12 @@ PERM_EDITABLE = 4
 
 class SpaceError(RuntimeError):
     """云空间/文档接口返回了业务错误。"""
+
+
+def _check_block_type(block_type: str) -> str:
+    if block_type not in BLOCK_TYPES:
+        raise SpaceError(f'不支持的块类型: {block_type}')
+    return block_type
 
 
 def _unwrap(path: str, body: dict) -> dict:
@@ -65,6 +77,14 @@ def _b36(number: int) -> str:
     if number < 36:
         return digits[number]
     return _b36(number // 36) + digits[number % 36]
+
+
+def _new_block_id(taken: dict) -> str:
+    """飞书块 id 是 27 位大小写字母数字；跟文档里已有的撞了就重摇。"""
+    while True:
+        candidate = ''.join(random.choices(_BLOCK_ID_ALPHABET, k=27))
+        if candidate not in taken:
+            return candidate
 
 
 def _make_node(text: str, attr_nums: list[int], num_to_attrib: dict) -> dict:
@@ -539,23 +559,86 @@ class SpaceClient:
             raise SpaceError(f'文档里没有这个块: {block_id}')
         old = _block_text(block)
         version = int(block.get('version') or 1)
-        author = self.auth.user_id
         keep = len(old) if append else 0
-        new_len = keep + len(text)
-        delta = new_len - len(old)
-        diff = f">{_b36(delta)}" if delta >= 0 else f"<{_b36(-delta)}"
         ops = f"={_b36(keep)}" + ("" if append else f"-{_b36(len(old))}")
-        changeset = f"Z:{_b36(len(old))}{diff}{ops}*0+{_b36(len(text))}${text}"
-        op = {"p": ["text"], "subType": {"t": "easysync", "o": {
-            "zone_changesets": {"0": changeset},
-            "apool": {"numToAttrib": {"0": ["author", author]}, "nextNum": 1,
-                      "attribToNum": {f"author,{author}": 0}}}}}
         return self._post('/space/api/docx/blocks/user_change',
                           json_body={"member_id": "10000000000000", "uuid": str(uuid.uuid4()),
                                      "page_id": token,
                                      "change_map": {block_id: {"id": block_id, "version": version,
-                                                             "payload": {"ops": [op]}}}},
+                                                             "payload": {"ops": [
+                                                                 self._text_op(len(old), text, ops)]}}}},
                           headers=self._csrf_headers())
+
+    def _text_op(self, old_len: int, text: str, keep_ops: str) -> dict:
+        """把块正文改成 text 的一条 changeset 操作（text 之前的保留/删除由 keep_ops 描述）。"""
+        length = len(text)
+        delta = length - old_len
+        diff = f">{_b36(delta)}" if delta >= 0 else f"<{_b36(-delta)}"
+        changeset = f"Z:{_b36(old_len)}{diff}{keep_ops}*0+{_b36(length)}${text}"
+        return {"p": ["text"], "subType": {"t": "easysync", "o": {
+            "zone_changesets": {"0": changeset},
+            "apool": {"numToAttrib": {"0": ["author", self.auth.user_id]}, "nextNum": 1,
+                      "attribToNum": {f"author,{self.auth.user_id}": 0}}}}}
+
+    def insert_block(self, url_or_token: str, text: str = '', *, block_type: str = 'text',
+                     parent_id: str = '', index: int | None = None, after: str = '') -> dict:
+        """插入一个新块，返回 {"block_id", "parent_id", "index"}。
+
+        协议：一次 user_change 带两条 change_map —— 新块自己（version 0，一条
+        ``{"p": [], "action": {"oi": 块数据}}``）和它的父块
+        （``{"p": ["children", 序号], "action": {"li": 新块 id}}``）。
+
+        block_type 取 BLOCK_TYPES 里的值。位置三选一：after 某个块（插在它后面）、
+        给 index、都不给就追加到父块末尾；parent_id 不给就是文档本身（顶层块）。
+        """
+        _check_block_type(block_type)
+        token, _, _ = self._doc_token(url_or_token)
+        blocks = self.document_blocks(token).get('block_map') or {}
+        if after:
+            host = blocks.get(after)
+            if host is None:
+                raise SpaceError(f'文档里没有这个块: {after}')
+            parent_id = str((host.get('data') or {}).get('parent_id') or '')
+            siblings = (blocks.get(parent_id, {}).get('data') or {}).get('children') or []
+            index = list(siblings).index(after) + 1
+        parent = blocks.get(parent_id or token)
+        if parent is None:
+            raise SpaceError(f'文档里没有这个父块: {parent_id}')
+        children = list((parent.get('data') or {}).get('children') or [])
+        index = len(children) if index is None else max(0, min(int(index), len(children)))
+        block_id = _new_block_id(blocks)
+        new_block = {"parent_id": parent.get('id') or token, "type": block_type,
+                     "children": [], "comments": [], "revisions": [],
+                     "author": self.auth.user_id,
+                     # 新块只能空着建，正文用同一次请求里的 changeset 写（带文字会被判 schema mismatch）。
+                     "text": {"initialAttributedTexts": {"text": {"0": ""}, "attribs": {"0": ""}},
+                              "apool": {"numToAttrib": {}, "nextNum": 0}},
+                     "folded": False}
+        ops = [{"p": [], "action": {"oi": new_block}}]
+        if text:
+            ops.append(self._text_op(0, text, ''))
+        response = self._post_block_op(token, {
+            block_id: {"id": block_id, "version": 0, "payload": {"ops": ops}},
+            parent["id"]: {"id": parent["id"], "version": int(parent.get('version') or 1),
+                           "payload": {"ops": [
+                               {"p": ["children", index], "action": {"li": block_id}}]}}})
+        return {"block_id": block_id, "parent_id": parent.get('id') or token, "index": index,
+                "response": response}
+
+    def set_block_type(self, url_or_token: str, block_id: str, block_type: str) -> dict:
+        """把已有块换成另一种类型（段↔标题↔列表↔待办↔引用↔代码块），返回服务端响应。
+
+        协议：在块上发一条 ``{"p": ["type"], "action": {"od": 旧类型, "oi": 新类型}}``。
+        """
+        _check_block_type(block_type)
+        token, _, _ = self._doc_token(url_or_token)
+        block = self.document_blocks(token).get('block_map', {}).get(block_id)
+        if block is None:
+            raise SpaceError(f'文档里没有这个块: {block_id}')
+        old_type = str((block.get('data') or {}).get('type') or 'text')
+        op = {"p": ["type"], "action": {"od": old_type, "oi": block_type}}
+        return self._post_block_op(token, {block_id: {"id": block_id, "version": int(block.get('version') or 1),
+                                                      "payload": {"ops": [op]}}})
 
     def delete_block(self, url_or_token: str, block_id: str) -> dict:
         """删掉一个块（连同它的子块）。返回服务端的响应。

@@ -300,3 +300,91 @@ def test_update_block_text_replaces_the_body(monkeypatch):
     # 旧正文 3 个字换成 8 个字：长度差 +5，删掉旧的 3 个，插入新的 8 个。
     assert change["payload"]["ops"][0]["subType"]["o"]["zone_changesets"]["0"] == "Z:3>5=0-3*0+8$new text"
     assert "X-CSRFToken" in headers
+
+
+def test_insert_block_creates_the_block_and_links_it_into_the_parent(monkeypatch):
+    blocks = {"code": 0, "data": {"block_map": {"doc1": {
+        "id": "doc1", "version": 4,
+        "data": {"type": "page", "children": ["h1", "p1"]}}, "h1": {
+        "id": "h1", "version": 1,
+        "data": {"type": "heading1", "parent_id": "doc1", "children": ["p1"]}}, "p1": {
+        "id": "p1", "version": 1,
+        "data": {"type": "text", "parent_id": "doc1", "children": []}}}}}
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse(blocks)
+
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs.get("json")))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    out = SpaceClient(auth_stub()).insert_block("doc1", "新标题", block_type="heading1", after="p1")
+
+    url, body = posts[0]
+    assert url.endswith("/space/api/docx/blocks/user_change")
+    assert body["page_id"] == "doc1"
+    assert out["parent_id"] == "doc1" and out["index"] == 2
+    new_block = body["change_map"][out["block_id"]]
+    assert new_block["version"] == 0
+    assert new_block["payload"]["ops"][0]["action"]["oi"] == {
+        "parent_id": "doc1", "type": "heading1", "children": [], "comments": [], "revisions": [],
+        "author": "7690398870819343329",
+        "text": {"initialAttributedTexts": {"text": {"0": ""}, "attribs": {"0": ""}},
+                 "apool": {"numToAttrib": {}, "nextNum": 0}},
+        "folded": False}
+    # 正文跟在建块后面，一次请求写完：空块 0 字 → 3 个字
+    assert new_block["payload"]["ops"][1]["subType"]["o"]["zone_changesets"]["0"] == "Z:0>3*0+3$新标题"
+    parent_op = body["change_map"]["doc1"]["payload"]["ops"][0]
+    assert parent_op == {"p": ["children", 2], "action": {"li": out["block_id"]}}
+
+
+def test_insert_block_defaults_to_the_end_and_rejects_unknown_types(monkeypatch):
+    blocks = {"code": 0, "data": {"block_map": {"doc1": {
+        "id": "doc1", "version": 1,
+        "data": {"type": "page", "children": ["p1"]}}, "p1": {
+        "id": "p1", "version": 1,
+        "data": {"type": "text", "parent_id": "doc1", "children": []}}}}}
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse(blocks)
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("json"))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    space = SpaceClient(auth_stub())
+    out = space.insert_block("doc1", "追加段")
+    assert out["index"] == 1
+    empty = space.insert_block("doc1")
+    assert empty["index"] == 1
+    # 没有正文就只建空块，不带 changeset
+    assert len(posts[1]["change_map"][empty["block_id"]]["payload"]["ops"]) == 1
+    with pytest.raises(SpaceError, match="不支持的块类型"):
+        space.insert_block("doc1", "x", block_type="heading0")
+
+
+def test_set_block_type_swaps_the_type_field(monkeypatch):
+    blocks = {"code": 0, "data": {"block_map": {"b1": {
+        "id": "b1", "version": 7, "data": {"type": "text"}}}}}
+    posts = []
+
+    def fake_get(url, **kwargs):
+        return FakeResponse(blocks)
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs.get("json"))
+        return FakeResponse({"code": 0, "data": {}})
+
+    monkeypatch.setattr("larkx.space.requests.get", fake_get)
+    monkeypatch.setattr("larkx.space.requests.post", fake_post)
+    SpaceClient(auth_stub()).set_block_type("doc1", "b1", "bullet")
+
+    change = posts[0]["change_map"]["b1"]
+    assert change["version"] == 7
+    assert change["payload"]["ops"] == [{"p": ["type"], "action": {"od": "text", "oi": "bullet"}}]
