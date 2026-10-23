@@ -172,7 +172,9 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
 坑：
 
 - 插入的正文要带样式：`*0+N`（0 号样式=author，N=插入字数）；**删掉的字不要带样式**（`*0-1` 会被服务端拒）。
-- changeset 里的"长度差"是**改完之后正文总长减旧长度**：追加 3 个字到 7 个字的块上是 `>3`（`Z:7>3=7*0+3$新字`），不是 `>3` 以外的别的数。服务端目前不校验这个字段，但写错了以后服务端一旦校验就会报 `algorithm process fail`。
+- changeset 里的"长度差"是**改完之后正文总长减旧长度**：追加 3 个字到 7 个字的块上是 `>3`（`Z:7>3=7*0+3$新字`）。服务端目前不校验这个字段，但写错了以后服务端一旦校验就会报 `algorithm process fail`。
+- **长度一律按块里的原始正文算**（`data.text.initialAttributedTexts.text` 拼起来的纯文本），不是按 markdown 渲染后的文本：`这是**加粗**文字` 原始是 6 个字、markdown 是 10 个字，用 10 写进 changeset 服务端会报 `algorithm process fail`。
+- **长度按 UTF-16 code unit 算**（飞书服务端是 JS 字符串）：emoji 算 2 个，`len(s.encode("utf-16-le")) // 2`。用 Python 的字符数会少算，插入时最后几个字会静默丢掉。
 - 块的版本号（乐观锁）0 是合法值，取版本要用 `int(block["version"])`，别用 `or 1` 把它变成 1。
 - `member_id` 用常量 `10000000000000` 即可，随机 14 位数字也能过网关，但计算阶段会失败。
 - `version` 用块的当前版本（`client_vars` 里每个块都有 `version`），版本不对会被拒。
