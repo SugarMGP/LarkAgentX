@@ -476,8 +476,8 @@ class SpaceClient:
             data.setdefault('block_map', {}).update(more.get('block_map') or {})
         return data
 
-    def document_markdown(self, url_or_token: str) -> str:
-        """读一篇文档并转成 markdown。传 wiki 链接、docx 链接或文档 token 都行。"""
+    def _doc_token(self, url_or_token: str) -> tuple[str, str, str]:
+        """(真实文档 token, space_id, wiki_token)：wiki 链接、docx 链接或 token 都行。"""
         # 分享链接常带 ?from= 或 #，文档 token 不能带查询串。
         url_or_token = url_or_token.strip().split('?', 1)[0].split('#', 1)[0]
         token = url_or_token
@@ -489,6 +489,11 @@ class SpaceClient:
             space_id = node['space_id']
         elif url_or_token.startswith('http'):
             token = url_or_token.rstrip('/').rsplit('/', 1)[-1]
+        return token, space_id, wiki_token
+
+    def document_markdown(self, url_or_token: str) -> str:
+        """读一篇文档并转成 markdown。传 wiki 链接、docx 链接或文档 token 都行。"""
+        token, space_id, wiki_token = self._doc_token(url_or_token)
         data = self.document_blocks(token, space_id=space_id, wiki_token=wiki_token)
         block_map = data.get('block_map') or {}
         sequence = [str(x) for x in (data.get('block_sequence') or [])]
@@ -496,25 +501,51 @@ class SpaceClient:
 
     # ---------- 编辑正文 ----------
 
-    def update_block_text(self, token: str, block_id: str, text: str) -> dict:
-        """整段替换一个正文块的内容，返回服务端的响应。
+    def document_outline(self, url_or_token: str) -> dict:
+        """文档的章节结构：{token, title, sections:[{id, level, title, blocks:[{id, type, text}]}]}。
+
+        用来定位"要改哪一段"：每个标题带上它下面的正文块，块 id 可以直接传给 update_block_text。
+        """
+        token, _, _ = self._doc_token(url_or_token)
+        data = self.document_blocks(token)
+        blocks = data.get('block_map') or {}
+        order = [b for b in (data.get('block_sequence') or list(blocks)) if b in blocks]
+        title = ''
+        sections: list[dict] = []
+        current: dict | None = None
+        for block_id in order:
+            meta = blocks[block_id].get('data') or {}
+            kind = str(meta.get('type') or '')
+            text = _block_text(blocks[block_id])
+            if kind == 'page':
+                title = text
+            elif kind.startswith('heading'):
+                current = {"id": block_id, "level": int(kind[7:] or 1), "title": text, "blocks": []}
+                sections.append(current)
+            elif kind == 'text' and current is not None:
+                current["blocks"].append({"id": block_id, "type": kind, "text": text})
+        return {"token": token, "title": title, "sections": sections}
+
+    def update_block_text(self, url_or_token: str, block_id: str, text: str, *, append: bool = False) -> dict:
+        """改一个正文块的内容（append=True 时在原文后面追加），返回服务端的响应。
 
         协议：先读块拿到当前正文和版本，再造 changeset 调
         POST /space/api/docx/blocks/user_change。changeset 形如
-        ``Z:<旧长度><新长度>=0-<旧长度>*0+<新长度>$<新正文>``。
+        ``Z:<旧长度><长度差><操作串>*0+<新长度>$<新正文>``。
         """
+        token, _, _ = self._doc_token(url_or_token)
         block = self.document_blocks(token).get('block_map', {}).get(block_id)
         if block is None:
             raise SpaceError(f'文档里没有这个块: {block_id}')
-        data = block.get('data') or {}
-        body = ((data.get('text') or {}).get('initialAttributedTexts') or {}).get('text') or {}
-        old = next(iter(body.values()), '') or ''
+        old = _block_text(block)
         version = int(block.get('version') or 1)
         author = self.auth.user_id
-        delta = len(text) - len(old)
+        keep = len(old) if append else 0
+        new_len = keep + len(text)
+        delta = new_len - len(old)
         diff = f">{_b36(delta)}" if delta >= 0 else f"<{_b36(-delta)}"
-        changeset = (f"Z:{_b36(len(old))}{diff}=0-{_b36(len(old))}"
-                     f"*0+{_b36(len(text))}${text}")
+        ops = f"={_b36(keep)}" + ("" if append else f"-{_b36(len(old))}")
+        changeset = f"Z:{_b36(len(old))}{diff}{ops}*0+{_b36(len(text))}${text}"
         op = {"p": ["text"], "subType": {"t": "easysync", "o": {
             "zone_changesets": {"0": changeset},
             "apool": {"numToAttrib": {"0": ["author", author]}, "nextNum": 1,
