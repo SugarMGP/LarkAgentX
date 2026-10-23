@@ -197,6 +197,14 @@ changeset 串格式（数字是 **base36 小写**，`0-9a-z`，`k`=20、`j`=19�
 
 抓这些 op 的办法（headless 里 `Input.dispatchKeyEvent` 不生效，必须 headful）：`/Applications/Google Chrome.app/... --remote-debugging-port=9336 --user-data-dir=/tmp/x`，CDP 连上后先 `Network.setCookie` 注入 cookie、导航到文档，**用 `Input.dispatchMouseEvent` 真点**进某个块（`Input.insertText` 会改 DOM 但光标键不响应，`Home`/方向键在未真点聚焦时是空操作），再用 `Input.dispatchKeyEvent` 发回车/字符。注意 CDP 客户端要用单个 reader 任务分发消息，`call()` 里顺手 `recv()` 会把 `Network.requestWillBeSent` 事件吞掉。
 
+## 图片：key、密文和解密
+
+- **上传图片**：`POST {file_host}/api/image`（multipart）→ 返回图片 key `img_v3_…`（`media.upload_image`）。
+- **消息里的图片**：`ImageContent`（消息类型 5）里是 `imageV2`：`imageKey`（就是那个 key）、`fsUnit`（如 `eu_nc-cdn`）、`crypto`（AES-256-GCM 的 `cipher.key`(32B)/`cipher.iv`(12B)/`cipher.extra`）、`variants`（各档尺寸）、`thumbnailInline`（消息里内联的 webp 缩略图，**明文**）。旧格式是 `image.imageKey` + `image.origin`。
+- **取图片字节**：`GET {file_host}/static-resource/image/{image_key}` → 拿到的是**密文**（比原图多 16 字节 GCM tag），要用消息里的 `crypto` 解密（AES-256-GCM，aad 为空）才是原图。
+- **别走 IM 网关取图**：网关有 `media.v1.GetResourceWithFsUnit`(1153)、`MGetResourcesWithFsUnit`(1154)、`DownloadFile`(1033)、`DownloadFiles`(1151) 这些命令，但本租户的 appid 大多报 `command: N not found`；网页端实际走的是文件服务那条 HTTP 路径。
+- LarkX 的封装：`media.image_resources(content)` 取图片资源、`media.open_image(auth, key)` 开上游响应、`media.decrypt_image(blob, crypto)` 解密。
+
 ## 不要留没人用的封装
 
 `LarkClient` 的方法如果只有自己那半个调用方在用，就是负债：会烂掉，还会被下游当成可用能力直接调。删掉比留着好。判断"没人用"要 grep 整个仓库（含 tests）和下游仓库。
